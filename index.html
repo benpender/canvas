@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>IR Matrix Tracker</title>
+    <style>
+        body { background: #111; color: white; display: flex; flex-direction: column; align-items: center; font-family: sans-serif; }
+        canvas { border: 2px solid #333; margin: 10px; }
+        #camPreview { position: fixed; bottom: 10px; right: 10px; width: 160px; border: 1px solid red; opacity: 0.5; }
+    </style>
+</head>
+<body>
+
+    <h2>Scan Canvas (The "Source")</h2>
+    <canvas id="visualCanvas" width="800" height="600"></canvas>
+    
+    <video id="webcam" autoplay muted playsinline style="display:none"></video>
+    <canvas id="trackingCanvas" style="display:none"></canvas>
+    
+    <canvas id="camPreview"></canvas>
+
+<script>
+    // --- CONFIG ---
+    const MATRIX_W = 8;
+    const MATRIX_H = 8;
+    const WS_URL = 'ws://localhost:8080';
+    
+    // --- GLOBALS ---
+    const visualCanvas = document.getElementById('visualCanvas');
+    const vCtx = visualCanvas.getContext('2d', { willReadFrequently: true });
+    
+    const trackingCanvas = document.getElementById('trackingCanvas');
+    const tCtx = trackingCanvas.getContext('2d', { willReadFrequently: true });
+
+    const camPreview = document.getElementById('camPreview'); // Debug view
+    const pCtx = camPreview.getContext('2d');
+    
+    const video = document.getElementById('webcam');
+    
+    // Tracking State
+    let fixtureX = 0;
+    let fixtureY = 0;
+    let targetX = 0;
+    let targetY = 0;
+
+    // WebSocket
+    const socket = new WebSocket(WS_URL);
+    
+    // --- 1. START WEBCAM ---
+    navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } })
+        .then(stream => {
+            video.srcObject = stream;
+            video.play();
+            trackingCanvas.width = 320;
+            trackingCanvas.height = 240;
+            camPreview.width = 320;
+            camPreview.height = 240;
+            requestAnimationFrame(loop);
+        })
+        .catch(e => console.error("Camera Error:", e));
+
+    // --- 2. MAIN LOOP ---
+    function loop() {
+        drawVisuals(); // Animate the background art
+        trackIR();     // Find the LED
+        scanAndSend(); // Send pixels to ESP32
+        requestAnimationFrame(loop);
+    }
+
+    // --- A. GENERATE VISUALS (Placeholder Art) ---
+    let time = 0;
+    function drawVisuals() {
+        time += 0.05;
+        const w = visualCanvas.width;
+        const h = visualCanvas.height;
+        
+        // Simple Plasma Effect
+        const grad = vCtx.createLinearGradient(0, 0, w, h);
+        grad.addColorStop(0, `hsl(${time * 40 % 360}, 100%, 50%)`);
+        grad.addColorStop(1, "blue");
+        vCtx.fillStyle = grad;
+        vCtx.fillRect(0, 0, w, h);
+        
+        // Draw a moving circle
+        vCtx.beginPath();
+        vCtx.arc(w/2 + Math.sin(time)*200, h/2 + Math.cos(time)*150, 100, 0, Math.PI*2);
+        vCtx.fillStyle = "white";
+        vCtx.fill();
+    }
+
+    // --- B. TRACK IR LED ---
+    function trackIR() {
+        if (video.readyState !== 4) return;
+
+        // Draw video to hidden canvas
+        tCtx.drawImage(video, 0, 0, trackingCanvas.width, trackingCanvas.height);
+        
+        // Get raw pixel data
+        const frame = tCtx.getImageData(0, 0, trackingCanvas.width, trackingCanvas.height);
+        const data = frame.data;
+        
+        let maxBright = 0;
+        let bestIdx = 0;
+
+        // Optimization: Step by 4 (RGBA) * 4 (Skip pixels) = 16
+        for (let i = 0; i < data.length; i += 16) {
+            // Check Red channel (IR often shows as white/red)
+            const r = data[i]; 
+            if (r > maxBright) {
+                maxBright = r;
+                bestIdx = i / 4;
+            }
+        }
+
+        // Only move if we found a bright spot (threshold 200/255)
+        if (maxBright > 200) {
+            const camW = trackingCanvas.width;
+            const camH = trackingCanvas.height;
+            
+            // Raw Camera Coords
+            const camX = bestIdx % camW;
+            const camY = Math.floor(bestIdx / camW);
+
+            // Map Camera -> Visual Canvas (Mirror X for natural feel)
+            // 1.0 - (camX/camW) flips the horizontal axis
+            targetX = (1.0 - (camX / camW)) * visualCanvas.width;
+            targetY = (camY / camH) * visualCanvas.height;
+        }
+
+        // Smooth movement (Lerp)
+        fixtureX += (targetX - fixtureX) * 0.1;
+        fixtureY += (targetY - fixtureY) * 0.1;
+
+        // Draw Debug on Preview
+        pCtx.drawImage(trackingCanvas, 0, 0);
+        pCtx.strokeStyle = "lime";
+        pCtx.lineWidth = 4;
+        pCtx.strokeRect((1.0 - (targetX/visualCanvas.width))*320 - 10, (targetY/visualCanvas.height)*240 - 10, 20, 20);
+    }
+
+    // --- C. SCAN GRID & SEND ---
+    function scanAndSend() {
+        if (socket.readyState !== WebSocket.OPEN) return;
+
+        // 1. Draw the "Fixture" box on the main canvas (so you can see it)
+        vCtx.strokeStyle = "white";
+        vCtx.lineWidth = 4;
+        vCtx.strokeRect(fixtureX - 4, fixtureY - 4, (MATRIX_W*10) + 8, (MATRIX_H*10) + 8);
+
+        // 2. Extract the 8x8 pixels
+        // We use a temporary small canvas to resize the chunk down to exactly 8x8
+        // This effectively "downsamples" the area under the fixture
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = MATRIX_W;
+        tempCanvas.height = MATRIX_H;
+        const tempCtx = tempCanvas.getContext('2d');
+        
+        // Crop area size (e.g., 80x80 pixels on screen maps to 8x8 LEDs)
+        const fixtureSize = 80; 
+        
+        tempCtx.drawImage(visualCanvas, fixtureX, fixtureY, fixtureSize, fixtureSize, 0, 0, MATRIX_W, MATRIX_H);
+        
+        const imgData = tempCtx.getImageData(0, 0, MATRIX_W, MATRIX_H).data; // [r,g,b,a, r,g,b,a...]
+
+        // 3. Clean Data (Remove Alpha Channel)
+        const rgbData = new Uint8Array(MATRIX_W * MATRIX_H * 3);
+        let ptr = 0;
+        for (let i = 0; i < imgData.length; i += 4) {
+            rgbData[ptr++] = imgData[i];     // R
+            rgbData[ptr++] = imgData[i + 1]; // G
+            rgbData[ptr++] = imgData[i + 2]; // B
+        }
+
+        // 4. Send Binary
+        socket.send(rgbData);
+    }
+</script>
+</body>
+</html>
