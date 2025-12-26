@@ -70,13 +70,21 @@
         // Mouse State (Default to center-ish so particles flow somewhere initially)
         const mouse = { x: width * 0.7, y: height * 0.5, active: false };
 
-        // Handle Mouse Coordinates relative to the scaled canvas
-        canvas.addEventListener('mousemove', (e) => {
+        function canvasToWorld(event) {
             const rect = canvas.getBoundingClientRect();
             const scaleX = canvas.width / rect.width;
             const scaleY = canvas.height / rect.height;
-            mouse.x = (e.clientX - rect.left) * scaleX;
-            mouse.y = (e.clientY - rect.top) * scaleY;
+            return {
+                x: (event.clientX - rect.left) * scaleX,
+                y: (event.clientY - rect.top) * scaleY
+            };
+        }
+
+        // Handle Mouse Coordinates relative to the scaled canvas
+        canvas.addEventListener('mousemove', (e) => {
+            const pos = canvasToWorld(e);
+            mouse.x = pos.x;
+            mouse.y = pos.y;
             mouse.active = true;
         });
 
@@ -100,7 +108,12 @@
             // Attractor
             attractRadius: 400,
             attractStrength: 0.5,
-            enableAttractor: true
+            enableAttractor: true,
+
+            // Repulsion
+            enableRepulsion: true,
+            repulseRadius: 250,
+            repulseStrength: 1.2
         };
 
         const gui = new lil.GUI({ title: 'Engine Settings' });
@@ -121,6 +134,11 @@
         fAttract.add(config, 'attractRadius', 50, 1000).name('Range');
         fAttract.add(config, 'attractStrength', 0.1, 5).name('Strength');
 
+        const fRepulse = gui.addFolder('Repulsion');
+        fRepulse.add(config, 'enableRepulsion').name('Enable Click Push');
+        fRepulse.add(config, 'repulseRadius', 50, 1000).name('Radius');
+        fRepulse.add(config, 'repulseStrength', 0.1, 5).name('Strength');
+
         // --- 3. Helper Functions ---
         
         // Convert Hex to RGB for interpolation
@@ -136,6 +154,18 @@
         // --- 4. Particle System ---
         
         let particles = [];
+        let repulsor = null;
+
+        canvas.addEventListener('click', (e) => {
+            if (!config.enableRepulsion) return;
+            const pos = canvasToWorld(e);
+            if (!repulsor) {
+                repulsor = { x: pos.x, y: pos.y };
+            } else {
+                repulsor.x = pos.x;
+                repulsor.y = pos.y;
+            }
+        });
 
         class Particle {
             constructor() {
@@ -177,19 +207,32 @@
                     }
                 }
 
-                // 3. Randomness (Jitter)
+                // 3. Repulsors
+                if (config.enableRepulsion && repulsor) {
+                    const dx = this.x - repulsor.x;
+                    const dy = this.y - repulsor.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+
+                    if (dist > 0 && dist < config.repulseRadius) {
+                        const force = config.repulseStrength * (1 - dist / config.repulseRadius);
+                        this.vx += (dx / dist) * force;
+                        this.vy += (dy / dist) * force;
+                    }
+                }
+
+                // 4. Randomness (Jitter)
                 this.vx += (Math.random() - 0.5) * config.randomness;
                 this.vy += (Math.random() - 0.5) * config.randomness;
 
-                // 4. Move
+                // 5. Move
                 this.x += this.vx;
                 this.y += this.vy;
 
-                // 5. Friction
+                // 6. Friction
                 this.vx *= config.friction;
                 this.vy *= config.friction;
 
-                // 6. Aging
+                // 7. Aging
                 this.life++;
                 if (this.life > this.maxLife) {
                     this.dead = true;
@@ -228,6 +271,15 @@
             // Spawn new particles
             for (let i = 0; i < config.emitRate; i++) {
                 particles.push(new Particle());
+            }
+
+            // Draw repulsor rings
+            if (config.enableRepulsion && repulsor) {
+                ctx.strokeStyle = 'rgba(255, 120, 120, 0.3)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(repulsor.x, repulsor.y, config.repulseRadius, 0, Math.PI * 2);
+                ctx.stroke();
             }
 
             // Update and draw particles
