@@ -1,4 +1,6 @@
 .pio/
+.platformio/
+node_modules/
 .vscode/
 __pycache__/
 *.pyc
