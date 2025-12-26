@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTML5 Particle System 1080p</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #050505;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        /* Container Logic:
+           We want a 1920x1080 internal resolution.
+           We use max-width/height + aspect-ratio to fit it on smaller screens
+           without breaking mouse coordinate mapping.
+        */
+        #canvas-wrapper {
+            position: relative;
+            width: 100%;
+            max-width: 1920px;
+            aspect-ratio: 16 / 9;
+            max-height: 100vh;
+            background-color: #000;
+            box-shadow: 0 0 60px rgba(0, 150, 255, 0.1);
+            border: 1px solid #333;
+        }
+
+        #tsparticles {
+            width: 100%;
+            height: 100%;
+            /* Ensure the canvas element itself is block to remove scrollbars */
+            display: block; 
+        }
+
+        .overlay {
+            position: absolute;
+            bottom: 30px;
+            left: 30px;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 18px;
+            pointer-events: none;
+            user-select: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-wrapper">
+        <div id="tsparticles"></div>
+        <div class="overlay">
+            Emitter: Center <br>
+            Attractor: Mouse
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/tsparticles@2.12.0/tsparticles.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lil-gui@0.18.0/dist/lil-gui.umd.min.js"></script>
+
+    <script>
+        // --- Configuration ---
+        const params = {
+            // Physics
+            speed: 8,
+            size: 2,
+            opacity: 1,
+            wobbleDistance: 6,
+            wobbleAngleSpeed: 30,
+            wobbleMoveSpeed: 12,
+            
+            // Appearance (Trails)
+            trailLength: 20, // High number = smoother line
+            trailFade: 0,    // 0 = solid trail, 1 = no trail
+            
+            // Colors
+            startColor: '#ff0000', // Red
+            endColor: '#00b3ff',
+            colorSpeed: 50, 
+            
+            // Interaction
+            attractRadius: 300,
+            attractStrength: 10,
+        };
+
+        let particleContainer = null;
+
+        // --- Logic ---
+        const initParticles = async () => {
+            particleContainer = await tsParticles.load("tsparticles", {
+                fpsLimit: 120,
+                fullScreen: { enable: false },
+                detectRetina: true,
+                
+                // IMPORTANT: Fixes mouse mapping on resized canvas
+                interactivity: {
+                    detectsOn: "canvas", 
+                    events: {
+                        onHover: {
+                            enable: true,
+                            mode: "attract"
+                        },
+                        resize: true
+                    },
+                    modes: {
+                        attract: {
+                            distance: params.attractRadius,
+                            duration: 0.4,
+                            factor: params.attractStrength,
+                            easing: "ease-out-quad",
+                            speed: 1,
+                            maxSpeed: 50
+                        }
+                    }
+                },
+
+                particles: {
+                    // Color Animation (Between start/end values)
+                    color: {
+                        value: [params.startColor, params.endColor],
+                        animation: {
+                            enable: true,
+                            speed: params.colorSpeed,
+                            sync: false 
+                        }
+                    },
+                    // The "Line" look comes from trails
+                    move: {
+                        enable: true,
+                        speed: params.speed,
+                        direction: "none",
+                        random: true,
+                        straight: false,
+                        outModes: "destroy",
+                        trail: {
+                            enable: true,
+                            length: params.trailLength,
+                            fill: { color: "#000000" } // Trail background color (black matches canvas)
+                        }
+                    },
+                    wobble: {
+                        enable: true,
+                        distance: params.wobbleDistance,
+                        speed: {
+                            angle: params.wobbleAngleSpeed,
+                            move: params.wobbleMoveSpeed
+                        }
+                    },
+                    number: { value: 0 }, // Handled by emitter
+                    opacity: {
+                        value: params.opacity
+                    },
+                    shape: {
+                        type: "circle"
+                    },
+                    size: {
+                        value: { min: 1, max: params.size }
+                    }
+                },
+
+                emitters: {
+                    direction: "none",
+                    rate: {
+                        quantity: 4,
+                        delay: 0.05
+                    },
+                    position: {
+                        x: 50,
+                        y: 50
+                    },
+                    size: { width: 0, height: 0 },
+                    life: {
+                        duration: 0.1,
+                        count: 0
+                    }
+                }
+            });
+
+            if (!window.guiSetup) {
+                setupGui();
+                window.guiSetup = true;
+            }
+        };
+
+        // --- GUI Setup ---
+        function setupGui() {
+            const gui = new lil.GUI({ title: 'Particle Controls' });
+
+            const refresh = () => {
+                if(!particleContainer) return;
+                
+                // Update Runtime Options
+                const opts = particleContainer.options;
+                
+                opts.particles.move.speed = params.speed;
+                opts.particles.size.value = { min: 1, max: params.size };
+                opts.particles.opacity.value = params.opacity;
+                
+                // Trail updates
+                opts.particles.move.trail.length = params.trailLength;
+                // 'trailFade' isn't a direct prop, usually controlled by fill color alpha or length
+                // We restart to apply complex trail changes effectively
+                
+                // Color updates
+                opts.particles.color.value = [params.startColor, params.endColor];
+                opts.particles.color.animation.speed = params.colorSpeed;
+
+                // Attractor updates
+                opts.interactivity.modes.attract.distance = params.attractRadius;
+                opts.interactivity.modes.attract.factor = params.attractStrength;
+
+                // Randomness updates
+                opts.particles.wobble.enable = params.wobbleDistance > 0;
+                opts.particles.wobble.distance = params.wobbleDistance;
+                opts.particles.wobble.speed.angle = params.wobbleAngleSpeed;
+                opts.particles.wobble.speed.move = params.wobbleMoveSpeed;
+
+                particleContainer.refresh();
+            };
+
+            const physics = gui.addFolder('Physics');
+            physics.add(params, 'speed', 1, 30).name('Speed').onChange(refresh);
+            physics.add(params, 'size', 1, 10).name('Size').onChange(refresh);
+            physics.add(params, 'opacity', 0.1, 1.0).name('Opacity').onChange(refresh);
+            physics.add(params, 'wobbleDistance', 0, 30).name('Randomness Dist').onChange(refresh);
+            physics.add(params, 'wobbleAngleSpeed', 0, 120).name('Randomness Spin').onChange(refresh);
+            physics.add(params, 'wobbleMoveSpeed', 0, 40).name('Randomness Move').onChange(refresh);
+
+            const visuals = gui.addFolder('Visuals (Smoothness)');
+            visuals.add(params, 'trailLength', 1, 100).name('Trail Length').onChange(refresh);
+            visuals.addColor(params, 'startColor').name('Start Color').onChange(refresh);
+            visuals.addColor(params, 'endColor').name('End Color').onChange(refresh);
+            visuals.add(params, 'colorSpeed', 0, 100).name('Color Cycle Spd').onChange(refresh);
+
+            const attract = gui.addFolder('Attractor');
+            attract.add(params, 'attractRadius', 100, 800).name('Radius').onChange(refresh);
+            attract.add(params, 'attractStrength', 1, 50).name('Pull Strength').onChange(refresh);
+        }
+
+        // Initialize
+        initParticles();
+
+    </script>
+</body>
+</html>
