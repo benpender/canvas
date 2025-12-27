@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>IR Tracking -> 8x8 Matrix Visualizer</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #000;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+
+<canvas id="canvas" width="1920" height="1080"></canvas>
+
+<script>
+/* =========================
+   CONFIG
+   ========================= */
+
+const CANVAS_W = 1920;
+const CANVAS_H = 1080;
+
+const MATRIX_W = 8;
+const MATRIX_H = 8;
+
+let trackedX = 0.5; // normalized 0..1
+let trackedY = 0.5;
+
+/* =========================
+   CANVAS SETUP
+   ========================= */
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+/* =========================
+   INPUT (mouse test)
+   Replace this later with OSC/WebSocket
+   ========================= */
+
+canvas.addEventListener("mousemove", e => {
+  const rect = canvas.getBoundingClientRect();
+  trackedX = (e.clientX - rect.left) / rect.width;
+  trackedY = (e.clientY - rect.top) / rect.height;
+});
+
+/* =========================
+   HELPERS
+   ========================= */
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function drawGrid(x, y, w, h, cols, rows) {
+  ctx.strokeStyle = "#333";
+  for (let i = 0; i <= cols; i++) {
+    ctx.beginPath();
+    ctx.moveTo(x + (i * w) / cols, y);
+    ctx.lineTo(x + (i * w) / cols, y + h);
+    ctx.stroke();
+  }
+  for (let j = 0; j <= rows; j++) {
+    ctx.beginPath();
+    ctx.moveTo(x, y + (j * h) / rows);
+    ctx.lineTo(x + w, y + (j * h) / rows);
+    ctx.stroke();
+  }
+}
+
+/* =========================
+   RENDER LOOP
+   ========================= */
+
+function draw() {
+  ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Background
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // === Camera space (left)
+  const camW = 800;
+  const camH = 450;
+  const camX = 100;
+  const camY = 100;
+
+  ctx.fillStyle = "#111";
+  ctx.fillRect(camX, camY, camW, camH);
+
+  drawGrid(camX, camY, camW, camH, MATRIX_W, MATRIX_H);
+
+  // Camera tracked point
+  const px = camX + trackedX * camW;
+  const py = camY + trackedY * camH;
+
+  ctx.fillStyle = "#0f0";
+  ctx.beginPath();
+  ctx.arc(px, py, 6, 0, Math.PI * 2);
+  ctx.fill();
+
+  // === Matrix space (right)
+  const matSize = 400;
+  const matX = 1100;
+  const matY = 100;
+
+  ctx.fillStyle = "#111";
+  ctx.fillRect(matX, matY, matSize, matSize);
+
+  drawGrid(matX, matY, matSize, matSize, MATRIX_W, MATRIX_H);
+
+  // Map to LED cell
+  const cellX = clamp(Math.floor(trackedX * MATRIX_W), 0, MATRIX_W - 1);
+  const cellY = clamp(Math.floor(trackedY * MATRIX_H), 0, MATRIX_H - 1);
+
+  const cellW = matSize / MATRIX_W;
+  const cellH = matSize / MATRIX_H;
+
+  ctx.fillStyle = "rgba(0,255,0,0.6)";
+  ctx.fillRect(
+    matX + cellX * cellW,
+    matY + cellY * cellH,
+    cellW,
+    cellH
+  );
+
+  // === Text overlay
+  ctx.fillStyle = "#0f0";
+  ctx.font = "16px monospace";
+  ctx.fillText(`Tracked X: ${trackedX.toFixed(3)}`, 100, 600);
+  ctx.fillText(`Tracked Y: ${trackedY.toFixed(3)}`, 100, 620);
+  ctx.fillText(`Matrix Cell: (${cellX}, ${cellY})`, 100, 640);
+
+  requestAnimationFrame(draw);
+}
+
+draw();
+</script>
+
+</body>
+</html>
