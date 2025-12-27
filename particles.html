@@ -96,10 +96,13 @@
             lifeSpan: 200,       // How long particles live
             
             // Visuals
-            startColor: '#ff0000',
+            startColor: '#ffffff',
             endColor: '#0000ff',
             lineWidth: 2,
             fadeEffect: 0.1,     // Trail fade (lower = longer trails)
+
+            // Mask
+            maskImageSrc: 'fern.jpg',
 
             // Physics
             randomness: 1.975,     // Jitter/Noise
@@ -139,6 +142,29 @@
         fRepulse.add(config, 'repulseRadius', 50, 1000).name('Radius');
         fRepulse.add(config, 'repulseStrength', 0.1, 5).name('Strength');
 
+        const trailCanvas = document.createElement('canvas');
+        const trailCtx = trailCanvas.getContext('2d');
+        const maskCanvas = document.createElement('canvas');
+        const maskCtx = maskCanvas.getContext('2d');
+        const imageCanvas = document.createElement('canvas');
+        const imageCtx = imageCanvas.getContext('2d');
+
+        [trailCanvas, maskCanvas, imageCanvas].forEach((surface) => {
+            surface.width = width;
+            surface.height = height;
+        });
+
+        const maskImage = new Image();
+        maskImage.decoding = 'async';
+        maskImage.src = config.maskImageSrc;
+        let maskImageReady = false;
+        maskImage.onload = () => {
+            maskImageReady = true;
+        };
+        maskImage.onerror = () => {
+            maskImageReady = false;
+        };
+
         // --- 3. Helper Functions ---
         
         // Convert Hex to RGB for interpolation
@@ -149,6 +175,27 @@
 
         function lerp(start, end, amt) {
             return (1 - amt) * start + amt * end;
+        }
+
+        function drawImageCover(ctx, image, targetWidth, targetHeight) {
+            const imageRatio = image.width / image.height;
+            const targetRatio = targetWidth / targetHeight;
+            let drawWidth = targetWidth;
+            let drawHeight = targetHeight;
+            let offsetX = 0;
+            let offsetY = 0;
+
+            if (imageRatio > targetRatio) {
+                drawHeight = targetHeight;
+                drawWidth = targetHeight * imageRatio;
+                offsetX = (targetWidth - drawWidth) * 0.5;
+            } else {
+                drawWidth = targetWidth;
+                drawHeight = targetWidth / imageRatio;
+                offsetY = (targetHeight - drawHeight) * 0.5;
+            }
+
+            ctx.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
         }
 
         // --- 4. Particle System ---
@@ -239,38 +286,70 @@
                 }
             }
 
-            draw(ctx) {
-                // Calculate color interpolation based on life
+            draw(trailCtx, maskCtx) {
                 const progress = this.life / this.maxLife;
                 const startRgb = hexToRgb(config.startColor);
-                const endRgb = hexToRgb(config.endColor);
-                
-                const r = Math.round(lerp(startRgb[0], endRgb[0], progress));
-                const g = Math.round(lerp(startRgb[1], endRgb[1], progress));
-                const b = Math.round(lerp(startRgb[2], endRgb[2], progress));
+                const whiteAlpha = Math.max(0, 1 - progress);
 
-                ctx.strokeStyle = `rgb(${r},${g},${b})`;
-                ctx.lineWidth = config.lineWidth;
-                ctx.lineCap = 'round';
+                trailCtx.strokeStyle = `rgba(${startRgb[0]},${startRgb[1]},${startRgb[2]},${whiteAlpha})`;
+                trailCtx.lineWidth = config.lineWidth;
+                trailCtx.lineCap = 'round';
 
-                ctx.beginPath();
-                ctx.moveTo(this.prevX, this.prevY);
-                ctx.lineTo(this.x, this.y);
-                ctx.stroke();
+                trailCtx.beginPath();
+                trailCtx.moveTo(this.prevX, this.prevY);
+                trailCtx.lineTo(this.x, this.y);
+                trailCtx.stroke();
+
+                maskCtx.strokeStyle = `rgba(255,255,255,${progress})`;
+                maskCtx.lineWidth = config.lineWidth;
+                maskCtx.lineCap = 'round';
+
+                maskCtx.beginPath();
+                maskCtx.moveTo(this.prevX, this.prevY);
+                maskCtx.lineTo(this.x, this.y);
+                maskCtx.stroke();
             }
         }
 
         // --- 5. Animation Loop ---
 
         function animate() {
-            // Create "Trails" by drawing a semi-transparent black rect over the canvas
-            // instead of clearing it completely.
-            ctx.fillStyle = `rgba(0, 0, 0, ${config.fadeEffect})`;
-            ctx.fillRect(0, 0, width, height);
+            // Create trails by fading the offscreen buffers.
+            trailCtx.fillStyle = `rgba(0, 0, 0, ${config.fadeEffect})`;
+            trailCtx.fillRect(0, 0, width, height);
+            maskCtx.globalCompositeOperation = 'destination-out';
+            maskCtx.fillStyle = `rgba(0, 0, 0, ${config.fadeEffect})`;
+            maskCtx.fillRect(0, 0, width, height);
+            maskCtx.globalCompositeOperation = 'source-over';
 
             // Spawn new particles
             for (let i = 0; i < config.emitRate; i++) {
                 particles.push(new Particle());
+            }
+
+            // Update and draw particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.update();
+                p.draw(trailCtx, maskCtx);
+
+                if (p.dead) {
+                    particles.splice(i, 1);
+                }
+            }
+
+            // Compose final frame
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(trailCanvas, 0, 0);
+
+            if (maskImageReady) {
+                imageCtx.clearRect(0, 0, width, height);
+                drawImageCover(imageCtx, maskImage, width, height);
+                imageCtx.globalCompositeOperation = 'destination-in';
+                imageCtx.drawImage(maskCanvas, 0, 0);
+                imageCtx.globalCompositeOperation = 'source-over';
+                ctx.drawImage(imageCanvas, 0, 0);
             }
 
             // Draw repulsor rings
@@ -280,17 +359,6 @@
                 ctx.beginPath();
                 ctx.arc(repulsor.x, repulsor.y, config.repulseRadius, 0, Math.PI * 2);
                 ctx.stroke();
-            }
-
-            // Update and draw particles
-            for (let i = particles.length - 1; i >= 0; i--) {
-                const p = particles[i];
-                p.update();
-                p.draw(ctx);
-
-                if (p.dead) {
-                    particles.splice(i, 1);
-                }
             }
 
             requestAnimationFrame(animate);
