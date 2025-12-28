@@ -25,8 +25,8 @@
         <script type="module">
 
             import * as THREE from 'three/webgpu';
-            // Added 'texture' and 'discard' to imports
-            import { float, If, PI, color, cos, instanceIndex, Loop, mix, mod, sin, instancedArray, Fn, uint, uniform, uniformArray, hash, vec3, vec4, texture, discard } from 'three/tsl';
+            // Removed 'discard' from imports to fix the error
+            import { float, If, PI, color, cos, instanceIndex, Loop, mix, mod, sin, instancedArray, Fn, uint, uniform, uniformArray, hash, vec3, vec4, texture } from 'three/tsl';
 
             import { Inspector } from 'three/addons/inspector/Inspector.js';
 
@@ -140,7 +140,6 @@
                 let ry = 0;
                 let rz = 0;
 
-                // Debug: quantize to 5-degree steps for easier readout; remove once mapping is confirmed.
                 const quantizeDeg = ( value ) => Math.round( value / 5 ) * 5;
                 const rollDeg = imuAxisEnabled.roll ? quantizeDeg( imuState.roll * imuConfig.mapping.roll.sign ) : 0;
                 const pitchDeg = imuAxisEnabled.pitch ? quantizeDeg( imuState.pitch * imuConfig.mapping.pitch.sign ) : 0;
@@ -178,18 +177,15 @@
                 scene = new THREE.Scene();
 
                 // ambient light
-
                 const ambientLight = new THREE.AmbientLight( '#ffffff', 0.5 );
                 scene.add( ambientLight );
 
                 // directional light
-
                 const directionalLight = new THREE.DirectionalLight( '#ffffff', 1.5 );
                 directionalLight.position.set( 4, 2, 0 );
                 scene.add( directionalLight );
 
                 // renderer
-
                 renderer = new THREE.WebGPURenderer( { antialias: true } );
                 renderer.setPixelRatio( window.devicePixelRatio );
                 renderer.setSize( window.innerWidth, window.innerHeight );
@@ -216,37 +212,38 @@
                 const personTexture = loader.load( 'person.jpg' );
                 personTexture.colorSpace = THREE.SRGBColorSpace;
 
-                // Create a SpriteNodeMaterial (Sprites always face the camera)
                 const personMaterial = new THREE.SpriteNodeMaterial();
                 
-                // IMPORTANT: We want to write to depth so pixels BEHIND the black area are hidden.
+                // Enable depth writing so black pixels block things behind them
                 personMaterial.depthWrite = true; 
                 personMaterial.depthTest = true;
+                
+                // IMPORTANT: Set alphaTest. 
+                // Any pixel with alpha < 0.5 is discarded (transparent/pass-through).
+                // Any pixel with alpha >= 0.5 is kept (opaque/blocking).
+                personMaterial.alphaTest = 0.5;
 
                 personMaterial.colorNode = Fn( () => {
                     const texColor = texture( personTexture );
-                    
-                    // Logic: If the pixel is White (or bright), we discard it.
-                    // This creates transparency that does NOT block background objects.
-                    // If the pixel is Black, we return Black. 
-                    // Since depthWrite is true, the Black pixels will occlude objects behind them.
-
-                    // Check brightness (using Red channel is enough for B&W image, or average them)
                     const brightness = texColor.r; 
                     
-                    // Threshold: If brightness is > 0.5 (White), discard the pixel.
+                    // Logic: 
+                    // Start with Alpha = 1.0 (Opaque).
+                    // If brightness > 0.5 (White), set Alpha = 0.0.
+                    
+                    const alpha = float( 1.0 ).toVar();
+                    
                     If( brightness.greaterThan( 0.5 ), () => {
-                        discard();
+                        alpha.assign( 0.0 );
                     } );
 
-                    // Return solid black for the remaining pixels (the mask)
-                    return vec4( 0.0, 0.0, 0.0, 1.0 ); 
+                    // Return Black color with calculated alpha
+                    return vec4( 0.0, 0.0, 0.0, alpha ); 
 
                 } )();
 
                 const personSprite = new THREE.Sprite( personMaterial );
-                personSprite.position.set( 0, 0, 0 ); // Centered on axis
-                // Adjust scale to fit scene. Camera is at 10, scene is approx +/- 5 units.
+                personSprite.position.set( 0, 0, 0 ); 
                 personSprite.scale.set( 6, 6, 1 ); 
                 scene.add( personSprite );
 
@@ -256,7 +253,6 @@
 
 
                 // attractors
-
                 const attractorsPositions = uniformArray( [
                     new THREE.Vector3( - 1, 0, 0 ),
                     new THREE.Vector3( 1, 0, - 0.5 ),
@@ -393,8 +389,7 @@
 
                 const update = Fn( () => {
 
-                    // const delta = timerDelta().mul( timeScale ).min( 1 / 30 ).toVar();
-                    const delta = float( 1 / 60 ).mul( timeScale ).toVar(); // uses fixed delta to consistent result
+                    const delta = float( 1 / 60 ).mul( timeScale ).toVar(); 
                     const position = positionBuffer.element( instanceIndex );
                     const velocity = velocityBuffer.element( instanceIndex );
 
