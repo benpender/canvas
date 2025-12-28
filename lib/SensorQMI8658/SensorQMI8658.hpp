@@ -37,6 +37,29 @@ public:
         LPF_MODE_2
     };
 
+    enum GyroRange {
+        GYRO_RANGE_32DPS   = QMI8658_GYRO_RANGE_32DPS,
+        GYRO_RANGE_64DPS   = QMI8658_GYRO_RANGE_64DPS,
+        GYRO_RANGE_128DPS  = QMI8658_GYRO_RANGE_128DPS,
+        GYRO_RANGE_256DPS  = QMI8658_GYRO_RANGE_256DPS,
+        GYRO_RANGE_512DPS  = QMI8658_GYRO_RANGE_512DPS,
+        GYRO_RANGE_1024DPS = QMI8658_GYRO_RANGE_1024DPS,
+        GYRO_RANGE_2048DPS = QMI8658_GYRO_RANGE_2048DPS,
+        GYRO_RANGE_4096DPS = QMI8658_GYRO_RANGE_4096DPS
+    };
+
+    enum GyroODR {
+        GYRO_ODR_8000Hz  = QMI8658_GYRO_ODR_8000HZ,
+        GYRO_ODR_4000Hz  = QMI8658_GYRO_ODR_4000HZ,
+        GYRO_ODR_2000Hz  = QMI8658_GYRO_ODR_2000HZ,
+        GYRO_ODR_1000Hz  = QMI8658_GYRO_ODR_1000HZ,
+        GYRO_ODR_500Hz   = QMI8658_GYRO_ODR_500HZ,
+        GYRO_ODR_250Hz   = QMI8658_GYRO_ODR_250HZ,
+        GYRO_ODR_125Hz   = QMI8658_GYRO_ODR_125HZ,
+        GYRO_ODR_62_5Hz  = QMI8658_GYRO_ODR_62_5HZ,
+        GYRO_ODR_31_25Hz = QMI8658_GYRO_ODR_31_25HZ
+    };
+
     SensorQMI8658() = default;
 
     bool begin(TwoWire &wire, uint8_t address, int sdaPin, int sclPin) {
@@ -48,6 +71,11 @@ public:
     void configAccelerometer(AccRange range, AccODR odr, LpfMode /*lpfMode*/) {
         driver.setAccelRange(static_cast<QMI8658_AccelRange>(range));
         driver.setAccelODR(static_cast<QMI8658_AccelODR>(odr));
+    }
+
+    void configGyroscope(GyroRange range, GyroODR odr, LpfMode /*lpfMode*/) {
+        driver.setGyroRange(static_cast<QMI8658_GyroRange>(range));
+        driver.setGyroODR(static_cast<QMI8658_GyroODR>(odr));
     }
 
     void enableAccelerometer() {
@@ -65,6 +93,11 @@ public:
     bool getAccelerometer(float &x, float &y, float &z) {
         // Return acceleration in mg to match Arduino sketch expectations
         return driver.readAccelMG(x, y, z);
+    }
+
+    bool getGyroscope(float &x, float &y, float &z) {
+        // Return gyro in dps to match Arduino sketch expectations
+        return driver.readGyroDPS(x, y, z);
     }
 
 private:
