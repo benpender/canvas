@@ -35,6 +35,37 @@
 			let attractorStatus = [];
 			let cameraState = null;
 			let cameraControls = null;
+			let imuSocket = null;
+			const imuState = {
+				roll: 0,
+				pitch: 0,
+				yaw: 0,
+				lastUpdate: 0,
+				connected: false
+			};
+			const imuDebug = true;
+			let lastImuLog = 0;
+			const defaultImuHost = '10.0.0.151';
+			const imuHost = ( window.location.hostname && window.location.hostname !== 'localhost' )
+				? window.location.hostname
+				: defaultImuHost;
+			const imuConfig = {
+				url: `ws://${imuHost}:81`,
+				timeoutMs: 1000,
+				mapping: {
+					order: 'XYZ',
+					roll: { axis: 'x', sign: 1 },
+					pitch: { axis: 'y', sign: 1 },
+					yaw: { axis: 'z', sign: 1 }
+				}
+			};
+			const imuAxisEnabled = {
+				roll: true,
+				pitch: true,
+				yaw: true
+			};
+			const imuEuler = new THREE.Euler();
+			const imuAxis = new THREE.Vector3();
 
 			const roundValue = ( value ) => Math.round( value * 1000 ) / 1000;
 			const syncCameraValue = ( control, state, key, value ) => {
@@ -54,6 +85,83 @@
 					control.input.value = rounded;
 				}
 
+			};
+
+			const connectImu = () => {
+				if ( imuSocket ) {
+					imuSocket.close();
+				}
+
+				imuSocket = new WebSocket( imuConfig.url );
+
+				imuSocket.addEventListener( 'open', () => {
+					imuState.connected = true;
+					if ( imuDebug ) console.log( '[IMU] connected', imuConfig.url );
+				} );
+
+				imuSocket.addEventListener( 'close', () => {
+					imuState.connected = false;
+					if ( imuDebug ) console.log( '[IMU] disconnected' );
+					setTimeout( connectImu, 1000 );
+				} );
+
+				imuSocket.addEventListener( 'error', ( event ) => {
+					if ( imuDebug ) console.log( '[IMU] error', event );
+				} );
+
+				imuSocket.addEventListener( 'message', ( event ) => {
+					try {
+						const data = JSON.parse( event.data );
+						if ( Number.isFinite( data.roll ) && Number.isFinite( data.pitch ) && Number.isFinite( data.yaw ) ) {
+							imuState.roll = data.roll;
+							imuState.pitch = data.pitch;
+							imuState.yaw = data.yaw;
+							imuState.lastUpdate = performance.now();
+							if ( imuDebug ) {
+								const now = performance.now();
+								if ( now - lastImuLog >= 1000 ) {
+									console.log( '[IMU] update', imuState );
+									lastImuLog = now;
+								}
+							}
+						}
+					} catch ( err ) {
+						if ( imuDebug ) console.log( '[IMU] parse error', err, event.data );
+					}
+				} );
+			};
+
+			const applyImuRotation = ( attractor ) => {
+				let rx = 0;
+				let ry = 0;
+				let rz = 0;
+
+				// Debug: quantize to 5-degree steps for easier readout; remove once mapping is confirmed.
+				const quantizeDeg = ( value ) => Math.round( value / 5 ) * 5;
+				const rollDeg = imuAxisEnabled.roll ? quantizeDeg( imuState.roll * imuConfig.mapping.roll.sign ) : 0;
+				const pitchDeg = imuAxisEnabled.pitch ? quantizeDeg( imuState.pitch * imuConfig.mapping.pitch.sign ) : 0;
+				const yawDeg = imuAxisEnabled.yaw ? quantizeDeg( imuState.yaw * imuConfig.mapping.yaw.sign ) : 0;
+
+				const rollRad = THREE.MathUtils.degToRad( rollDeg );
+				const pitchRad = THREE.MathUtils.degToRad( pitchDeg );
+				const yawRad = THREE.MathUtils.degToRad( yawDeg );
+
+				if ( imuConfig.mapping.roll.axis === 'x' ) rx = rollRad;
+				if ( imuConfig.mapping.roll.axis === 'y' ) ry = rollRad;
+				if ( imuConfig.mapping.roll.axis === 'z' ) rz = rollRad;
+
+				if ( imuConfig.mapping.pitch.axis === 'x' ) rx = pitchRad;
+				if ( imuConfig.mapping.pitch.axis === 'y' ) ry = pitchRad;
+				if ( imuConfig.mapping.pitch.axis === 'z' ) rz = pitchRad;
+
+				if ( imuConfig.mapping.yaw.axis === 'x' ) rx = yawRad;
+				if ( imuConfig.mapping.yaw.axis === 'y' ) ry = yawRad;
+				if ( imuConfig.mapping.yaw.axis === 'z' ) rz = yawRad;
+
+				imuEuler.set( rx, ry, rz, imuConfig.mapping.order );
+				attractor.reference.rotation.copy( imuEuler );
+				imuAxis.set( 0, 1, 0 ).applyEuler( imuEuler ).normalize();
+				attractor.orientation.copy( imuAxis );
 			};
 
 			init();
@@ -94,6 +202,7 @@
 				controls.maxDistance = 50;
 
 				window.addEventListener( 'resize', onWindowResize );
+				connectImu();
 
 				// attractors
 
@@ -393,6 +502,14 @@
 
 				const cameraGroup = renderer.inspector.parameters.createGroup( 'Camera' );
 
+				const imuGroup = renderer.inspector.parameters.createGroup( 'IMU Mapping' );
+				const imuRollControl = imuGroup.add( imuAxisEnabled, 'roll' ).name( 'Apply Roll (X)' );
+				const imuPitchControl = imuGroup.add( imuAxisEnabled, 'pitch' ).name( 'Apply Pitch (Y)' );
+				const imuYawControl = imuGroup.add( imuAxisEnabled, 'yaw' ).name( 'Apply Yaw (Z)' );
+				[ imuRollControl, imuPitchControl, imuYawControl ].forEach( ( control ) => {
+					control.listen();
+				} );
+
 				const updateControlsTargetFromCamera = () => {
 
 					if ( ! controls ) return;
@@ -464,6 +581,20 @@
 			async function animate() {
 
 				controls.update();
+
+				const imuActive = imuState.connected && ( performance.now() - imuState.lastUpdate <= imuConfig.timeoutMs );
+				if ( imuActive && attractors.length > 2 ) {
+					applyImuRotation( attractors[ 2 ] );
+				} else if ( imuDebug && imuState.connected ) {
+					const now = performance.now();
+					if ( now - lastImuLog >= 1000 ) {
+						console.log( '[IMU] stale data', {
+							ageMs: now - imuState.lastUpdate,
+							timeoutMs: imuConfig.timeoutMs
+						} );
+						lastImuLog = now;
+					}
+				}
 
 				if ( statusState ) {
 
