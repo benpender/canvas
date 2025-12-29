@@ -1,15 +1,68 @@
 <!DOCTYPE html>
 <html lang="en">
     <head>
-        <title>three.js webgpu - attractors particles with masked projection</title>
+        <title>three.js webgpu - attractors particles with webcam mask</title>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
         <style>
             body { margin: 0; overflow: hidden; background-color: #000; color: #fff; font-family: sans-serif; }
             a { color: #fff; }
+
+            #maskCanvas {
+                position: fixed;
+                left: 12px;
+                bottom: 12px;
+                width: 160px;
+                height: auto;
+                border: 1px solid #333;
+                z-index: 1000;
+                display: none;
+                opacity: 0.8;
+                pointer-events: none;
+            }
+
+            #webcam-controls {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                padding: 6px 10px;
+                background: var(--profiler-header-bg, rgba(42, 42, 51, 0.7));
+                border-bottom: 1px solid var(--profiler-border, #444);
+                font-family: var(--font-family, sans-serif);
+            }
+
+            #webcam-controls button {
+                background: #0a84ff;
+                border: none;
+                color: #fff;
+                padding: 6px 12px;
+                border-radius: 6px;
+                font-size: 12px;
+                font-weight: 600;
+                cursor: pointer;
+            }
+
+            #webcam-controls button:disabled {
+                opacity: 0.6;
+                cursor: default;
+            }
+
+            #webcam-controls span {
+                font-size: 11px;
+                color: var(--text-secondary, #aaa);
+            }
+
+            #webcam-controls span[data-state="error"] {
+                color: #ff7a7a;
+            }
         </style>
     </head>
     <body>
+        <canvas id="maskCanvas" width="640" height="360"></canvas>
+        <video id="input_video" style="display: none;"></video>
+
+        <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose"></script>
+        <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
 
         <script type="importmap">
             {
@@ -25,13 +78,178 @@
         <script type="module">
 
             import * as THREE from 'three/webgpu';
-            // Removed 'discard' from imports to fix the error
             import { atan2, cameraViewMatrix, float, If, PI, color, cos, instanceIndex, Loop, mix, mod, sin, instancedArray, Fn, uint, uniform, uniformArray, hash, uv, vec3, vec4, texture } from 'three/tsl';
 
             import { Inspector } from 'three/addons/inspector/Inspector.js';
 
             import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
             import { TransformControls } from 'three/addons/controls/TransformControls.js';
+
+            const videoElement = document.getElementById( 'input_video' );
+            const maskCanvas = document.getElementById( 'maskCanvas' );
+            const maskCtx = maskCanvas.getContext( '2d' );
+            const procCanvas = document.createElement( 'canvas' );
+            const procCtx = procCanvas.getContext( '2d' );
+
+            maskCtx.imageSmoothingEnabled = true;
+            procCtx.imageSmoothingEnabled = true;
+
+            const showMaskPreview = true;
+            maskCanvas.style.display = showMaskPreview ? 'block' : 'none';
+
+            const maskTexture = new THREE.CanvasTexture( maskCanvas );
+            maskTexture.colorSpace = THREE.SRGBColorSpace;
+            maskTexture.minFilter = THREE.LinearFilter;
+            maskTexture.magFilter = THREE.LinearFilter;
+            maskTexture.generateMipmaps = false;
+
+            const fillMaskWhite = () => {
+
+                maskCtx.save();
+                maskCtx.setTransform( 1, 0, 0, 1, 0, 0 );
+                maskCtx.fillStyle = '#ffffff';
+                maskCtx.fillRect( 0, 0, maskCanvas.width, maskCanvas.height );
+                maskCtx.restore();
+                maskTexture.needsUpdate = true;
+
+            };
+
+            fillMaskWhite();
+
+            let pose = null;
+            let webcamActive = false;
+            let webcamButton = null;
+            let webcamStatus = null;
+
+            const updateWebcamStatus = ( text, isError = false ) => {
+
+                if ( ! webcamStatus ) return;
+                webcamStatus.textContent = text;
+                webcamStatus.dataset.state = isError ? 'error' : 'ok';
+
+            };
+
+            const onPoseResults = ( results ) => {
+
+                if ( ! results.segmentationMask ) return;
+
+                if ( maskCanvas.width !== procCanvas.width || maskCanvas.height !== procCanvas.height ) {
+                    maskCanvas.width = procCanvas.width;
+                    maskCanvas.height = procCanvas.height;
+                }
+
+                maskCtx.save();
+                maskCtx.globalCompositeOperation = 'source-over';
+                maskCtx.fillStyle = '#000000';
+                maskCtx.fillRect( 0, 0, maskCanvas.width, maskCanvas.height );
+
+                maskCtx.globalCompositeOperation = 'destination-in';
+                maskCtx.drawImage( results.segmentationMask, 0, 0, maskCanvas.width, maskCanvas.height );
+
+                maskCtx.globalCompositeOperation = 'destination-over';
+                maskCtx.fillStyle = '#ffffff';
+                maskCtx.fillRect( 0, 0, maskCanvas.width, maskCanvas.height );
+                maskCtx.restore();
+
+                maskTexture.needsUpdate = true;
+
+            };
+
+            const initPose = () => {
+
+                if ( pose ) return;
+                if ( ! window.Pose ) {
+                    updateWebcamStatus( 'Pose library missing.', true );
+                    return;
+                }
+
+                pose = new window.Pose( {
+                    locateFile: ( file ) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+                } );
+
+                pose.setOptions( {
+                    modelComplexity: 1,
+                    smoothLandmarks: true,
+                    enableSegmentation: true,
+                    smoothSegmentation: true,
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5
+                } );
+
+                pose.onResults( onPoseResults );
+
+            };
+
+            const startWebcam = async () => {
+
+                if ( webcamActive ) return;
+
+                initPose();
+                if ( ! pose ) return;
+
+                try {
+
+                    updateWebcamStatus( 'Requesting camera...' );
+                    if ( webcamButton ) webcamButton.disabled = true;
+
+                    const stream = await navigator.mediaDevices.getUserMedia( {
+                        video: { width: { ideal: 2560 }, height: { ideal: 720 } }
+                    } );
+
+                    videoElement.srcObject = stream;
+
+                    videoElement.onloadedmetadata = () => {
+
+                        videoElement.play();
+
+                        const w = videoElement.videoWidth;
+                        const h = videoElement.videoHeight;
+                        const cropWidth = Math.max( 1, Math.floor( w / 2 ) );
+
+                        procCanvas.width = cropWidth;
+                        procCanvas.height = h;
+                        maskCanvas.width = cropWidth;
+                        maskCanvas.height = h;
+                        fillMaskWhite();
+
+                        webcamActive = true;
+                        updateWebcamStatus( `Live ${cropWidth}x${h} (left crop)` );
+
+                        const sendToAI = async () => {
+
+                            if ( ! webcamActive || videoElement.paused || videoElement.ended ) return;
+
+                            procCtx.save();
+                            procCtx.translate( 0, procCanvas.height );
+                            procCtx.scale( 1, -1 );
+                            procCtx.drawImage( videoElement, 0, 0, cropWidth, h, 0, 0, procCanvas.width, procCanvas.height );
+                            procCtx.restore();
+
+                            try {
+                                await pose.send( { image: procCanvas } );
+                            } catch ( err ) {
+                                updateWebcamStatus( `Pose error: ${err.message}`, true );
+                                webcamActive = false;
+                                if ( webcamButton ) webcamButton.disabled = false;
+                                return;
+                            }
+
+                            requestAnimationFrame( sendToAI );
+
+                        };
+
+                        sendToAI();
+
+                    };
+
+                } catch ( err ) {
+
+                    updateWebcamStatus( `Camera error: ${err.message}`, true );
+                    if ( webcamButton ) webcamButton.disabled = false;
+
+                }
+
+            };
 
             let camera, scene, renderer, controls, updateCompute;
             let attractors = [];
@@ -167,6 +385,35 @@
                 attractor.orientation.copy( imuAxis );
             };
 
+            const setupWebcamControls = () => {
+
+                const profilerRoot = renderer?.inspector?.domElement;
+                if ( ! profilerRoot ) return;
+
+                const panel = profilerRoot.querySelector( '#profiler-panel' );
+                if ( ! panel || panel.querySelector( '#webcam-controls' ) ) return;
+
+                const header = panel.querySelector( '.profiler-header' );
+                if ( ! header ) return;
+
+                const row = document.createElement( 'div' );
+                row.id = 'webcam-controls';
+
+                webcamButton = document.createElement( 'button' );
+                webcamButton.id = 'webcam-start-btn';
+                webcamButton.textContent = 'Start Webcam Mask';
+
+                webcamStatus = document.createElement( 'span' );
+                webcamStatus.textContent = 'Idle';
+                webcamStatus.dataset.state = 'ok';
+
+                webcamButton.addEventListener( 'click', startWebcam );
+
+                row.append( webcamButton, webcamStatus );
+                panel.insertBefore( row, header.nextSibling );
+
+            };
+
             init();
 
             async function init() {
@@ -196,6 +443,8 @@
 
                 await renderer.init();
 
+                setupWebcamControls();
+
                 controls = new OrbitControls( camera, renderer.domElement );
                 controls.enableDamping = true;
                 controls.minDistance = 0.1;
@@ -207,45 +456,36 @@
                 // -----------------------------------------------------------------
                 // START: Projection Mask Setup
                 // -----------------------------------------------------------------
-                
-                const loader = new THREE.TextureLoader();
-                const personTexture = loader.load( 'person.jpg' );
-                personTexture.colorSpace = THREE.SRGBColorSpace;
 
-                const personMaterial = new THREE.SpriteNodeMaterial();
-                
+                const maskMaterial = new THREE.SpriteNodeMaterial();
+
                 // Enable depth writing so black pixels block things behind them
-                personMaterial.depthWrite = true; 
-                personMaterial.depthTest = true;
-                
-                // IMPORTANT: Set alphaTest. 
+                maskMaterial.depthWrite = true;
+                maskMaterial.depthTest = true;
+
+                // IMPORTANT: Set alphaTest.
                 // Any pixel with alpha < 0.5 is discarded (transparent/pass-through).
                 // Any pixel with alpha >= 0.5 is kept (opaque/blocking).
-                personMaterial.alphaTest = 0.5;
+                maskMaterial.alphaTest = 0.5;
 
-                personMaterial.colorNode = Fn( () => {
-                    const texColor = texture( personTexture );
-                    const brightness = texColor.r; 
-                    
-                    // Logic: 
-                    // Start with Alpha = 1.0 (Opaque).
-                    // If brightness > 0.5 (White), set Alpha = 0.0.
-                    
+                maskMaterial.colorNode = Fn( () => {
+                    const texColor = texture( maskTexture );
+                    const brightness = texColor.r;
+
                     const alpha = float( 1.0 ).toVar();
-                    
+
                     If( brightness.greaterThan( 0.5 ), () => {
                         alpha.assign( 0.0 );
                     } );
 
-                    // Return Black color with calculated alpha
-                    return vec4( 0.0, 0.0, 0.0, alpha ); 
+                    return vec4( 0.0, 0.0, 0.0, alpha );
 
                 } )();
 
-                const personSprite = new THREE.Sprite( personMaterial );
-                personSprite.position.set( 0, 0, 0 ); 
-                personSprite.scale.set( 6, 6, 1 ); 
-                scene.add( personSprite );
+                const maskSprite = new THREE.Sprite( maskMaterial );
+                maskSprite.position.set( 0, 0, 0 );
+                maskSprite.scale.set( 6, 6, 1 );
+                scene.add( maskSprite );
 
                 // -----------------------------------------------------------------
                 // END: Projection Mask Setup
@@ -389,7 +629,7 @@
 
                 const update = Fn( () => {
 
-                    const delta = float( 1 / 60 ).mul( timeScale ).toVar(); 
+                    const delta = float( 1 / 60 ).mul( timeScale ).toVar();
                     const position = positionBuffer.element( instanceIndex );
                     const velocity = velocityBuffer.element( instanceIndex );
 

@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>2D Silhouette Mask</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin:0; background:#000; color:#9f9; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    header { position:sticky; top:0; background:#000; border-bottom:1px solid #133; padding:10px 12px; z-index:10; }
+    h1 { margin:0; font-size:16px; color:#0f0; }
+    .sub { margin-top:6px; font-size:12px; line-height:1.35; color:#7f7; }
+    .warn { color:#fb6; }
+    .wrap { display:flex; flex-wrap:wrap; gap:12px; padding:12px; justify-content:center; align-items:flex-start; }
+    .panel { width:min(560px, 96vw); border:1px solid #133; border-radius:10px; padding:10px 12px; }
+    label { display:block; margin:10px 0 4px; font-size:12px; }
+    input[type="range"] { width:100%; }
+    input[type="checkbox"] { transform: translateY(1px); }
+    button { background:#060; color:#dfd; border:1px solid #2a2; border-radius:10px; padding:8px 10px; cursor:pointer; }
+    button:disabled { opacity:0.5; cursor:not-allowed; }
+    canvas { border:1px solid #333; border-radius:10px; image-rendering: pixelated; }
+    .cap { text-align:center; font-size:12px; color:#7f7; margin:6px 0; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; justify-content:center; }
+    pre { margin:10px 0 0; font-size:12px; white-space:pre-wrap; color:#7f7; }
+
+    /* IMPORTANT: do NOT display:none the video (some cams decode black if hidden) */
+    #vid {
+      position:fixed; left:8px; bottom:8px;
+      width:2px; height:2px; opacity:0.01;
+      pointer-events:none;
+    }
+  </style>
+</head>
+<body>
+<header>
+  <h1>2D Silhouette Mask (white=person, black=background)</h1>
+  <div class="sub">
+    Uses running background subtraction. Click <b>Reset background</b> if the scene changes.<br>
+    <span class="warn">Tip: lower Learn Rate to lock the background once the dancer is framed.</span>
+  </div>
+</header>
+
+<video id="vid" autoplay playsinline muted></video>
+
+<div class="wrap">
+  <div class="panel">
+    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;">
+      <div>
+        <button id="start">Start camera</button>
+        <button id="stop" disabled>Stop</button>
+      </div>
+      <div id="status" style="font-size:12px; color:#7f7;">Waiting…</div>
+    </div>
+
+    <label>Threshold (0-255): <span id="thTxt">35</span></label>
+    <input id="th" type="range" min="0" max="255" step="1" value="35">
+
+    <label>Learn rate (0-1): <span id="lrTxt">0.020</span></label>
+    <input id="learn" type="range" min="0" max="1" step="0.005" value="0.02">
+
+    <div class="row">
+      <div style="flex:1; min-width:220px;">
+        <label>Compute width (px): <span id="cwTxt">320</span></label>
+        <input id="cw" type="range" min="160" max="640" step="16" value="320">
+      </div>
+      <div style="flex:1; min-width:220px;">
+        <label>Compute every N frames: <span id="everyTxt">1</span></label>
+        <input id="every" type="range" min="1" max="8" step="1" value="1">
+      </div>
+    </div>
+
+    <label>Blur (odd): <span id="blurTxt">3</span></label>
+    <input id="blur" type="range" min="1" max="9" step="2" value="3">
+
+    <div class="row">
+      <label style="flex:1; min-width:220px;"><input id="invert" type="checkbox"> Invert mask</label>
+      <label style="flex:1; min-width:220px;"><input id="debug" type="checkbox"> Debug (show diff)</label>
+    </div>
+
+    <button id="reset">Reset background</button>
+
+    <pre id="calc"></pre>
+  </div>
+
+  <div class="panel" style="text-align:center;">
+    <div class="cap">INPUT</div>
+    <canvas id="in" width="320" height="240"></canvas>
+
+    <div class="cap" style="margin-top:10px;">OUTPUT (mask)</div>
+    <canvas id="out" width="320" height="240"></canvas>
+
+    <pre id="perf"></pre>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+
+  const vid = $("vid");
+  const startBtn = $("start"), stopBtn = $("stop"), resetBtn = $("reset");
+  const statusEl = $("status"), calcEl = $("calc"), perfEl = $("perf");
+
+  const th = $("th"), learn = $("learn"), cw = $("cw"), every = $("every"), blur = $("blur");
+  const invert = $("invert"), debug = $("debug");
+  const thTxt = $("thTxt"), lrTxt = $("lrTxt"), cwTxt = $("cwTxt"), everyTxt = $("everyTxt"), blurTxt = $("blurTxt");
+
+  const inCanvas = $("in");
+  const outCanvas = $("out");
+  const inCtx = inCanvas.getContext("2d");
+  const outCtx = outCanvas.getContext("2d");
+  inCtx.imageSmoothingEnabled = false;
+  outCtx.imageSmoothingEnabled = false;
+
+  const frameCanvas = document.createElement("canvas");
+  const frameCtx = frameCanvas.getContext("2d", { willReadFrequently: true });
+
+  let running = false;
+  let stream = null;
+  let dims = null;
+  let bg = null;
+  let bgReady = false;
+  let lastMask = null;
+  let maskImageData = null;
+  let blurTmp = null;
+
+  let frameCount = 0;
+  let fps = 0, frames = 0, lastFpsT = performance.now();
+  let lastComputeMs = 0;
+  let lastFrameMs = 0;
+
+  function syncLabels() {
+    thTxt.textContent = th.value;
+    lrTxt.textContent = Number(learn.value).toFixed(3);
+    cwTxt.textContent = cw.value;
+    everyTxt.textContent = every.value;
+    blurTxt.textContent = blur.value;
+  }
+  [th, learn, cw, every, blur, invert, debug].forEach(el => el.addEventListener("input", syncLabels));
+  syncLabels();
+
+  function resetBackground(message) {
+    bgReady = false;
+    if (message) statusEl.textContent = message;
+  }
+
+  function updateDims(videoW, videoH) {
+    const computeW = (+cw.value) | 0;
+    const computeH = Math.max(1, Math.round(computeW * (videoH / videoW)));
+
+    if (inCanvas.width !== computeW || inCanvas.height !== computeH) {
+      inCanvas.width = computeW;
+      inCanvas.height = computeH;
+    }
+    if (outCanvas.width !== computeW || outCanvas.height !== computeH) {
+      outCanvas.width = computeW;
+      outCanvas.height = computeH;
+    }
+    if (frameCanvas.width !== computeW || frameCanvas.height !== computeH) {
+      frameCanvas.width = computeW;
+      frameCanvas.height = computeH;
+    }
+
+    const count = computeW * computeH;
+    bg = new Float32Array(count);
+    lastMask = new Uint8ClampedArray(count);
+    maskImageData = outCtx.createImageData(computeW, computeH);
+    blurTmp = new Uint32Array(count);
+    bgReady = false;
+
+    return { videoW, videoH, computeW, computeH };
+  }
+
+  function boxBlur(src, dst, w, h, radius, tmp) {
+    const r = radius | 0;
+    const windowSize = (r * 2 + 1);
+    const denom = windowSize * windowSize;
+
+    for (let y = 0; y < h; y++) {
+      let sum = 0;
+      const row = y * w;
+      for (let x = -r; x <= r; x++) {
+        const xi = Math.min(w - 1, Math.max(0, x));
+        sum += src[row + xi];
+      }
+      for (let x = 0; x < w; x++) {
+        tmp[row + x] = sum;
+        const x1 = x - r;
+        const x2 = x + r + 1;
+        const i1 = row + Math.min(w - 1, Math.max(0, x1));
+        const i2 = row + Math.min(w - 1, Math.max(0, x2));
+        sum += src[i2] - src[i1];
+      }
+    }
+
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      for (let y = -r; y <= r; y++) {
+        const yi = Math.min(h - 1, Math.max(0, y));
+        sum += tmp[yi * w + x];
+      }
+      for (let y = 0; y < h; y++) {
+        const idx = y * w + x;
+        dst[idx] = Math.round(sum / denom);
+        const y1 = y - r;
+        const y2 = y + r + 1;
+        const i1 = Math.min(h - 1, Math.max(0, y1)) * w + x;
+        const i2 = Math.min(h - 1, Math.max(0, y2)) * w + x;
+        sum += tmp[i2] - tmp[i1];
+      }
+    }
+  }
+
+  function updateOutput() {
+    if (!lastMask || !maskImageData || !dims) return;
+    const data = maskImageData.data;
+    for (let i = 0, j = 0; i < lastMask.length; i++, j += 4) {
+      const v = lastMask[i];
+      data[j] = v;
+      data[j + 1] = v;
+      data[j + 2] = v;
+      data[j + 3] = 255;
+    }
+    outCtx.putImageData(maskImageData, 0, 0);
+  }
+
+  function loop() {
+    if (!running) return;
+    const t0 = performance.now();
+
+    const videoW = vid.videoWidth;
+    const videoH = vid.videoHeight;
+    if (!videoW || !videoH) {
+      requestAnimationFrame(loop);
+      return;
+    }
+
+    const computeW = (+cw.value) | 0;
+    if (!dims || dims.videoW !== videoW || dims.videoH !== videoH || dims.computeW !== computeW) {
+      dims = updateDims(videoW, videoH);
+      statusEl.textContent = "Background initializing…";
+    }
+
+    frameCtx.drawImage(vid, 0, 0, videoW, videoH, 0, 0, dims.computeW, dims.computeH);
+    inCtx.drawImage(frameCanvas, 0, 0);
+
+    frameCount++;
+    const n = Math.max(1, (+every.value) | 0);
+    const doCompute = (frameCount % n) === 0;
+
+    if (doCompute) {
+      const t1 = performance.now();
+      const imageData = frameCtx.getImageData(0, 0, dims.computeW, dims.computeH);
+      const data = imageData.data;
+      const count = dims.computeW * dims.computeH;
+      const threshold = (+th.value) | 0;
+      const lr = Number(learn.value);
+      const useDebug = debug.checked;
+      const useInvert = invert.checked;
+
+      let diffSum = 0;
+
+      if (!bgReady) {
+        for (let i = 0, p = 0; i < count; i++, p += 4) {
+          const g = (data[p] * 0.299 + data[p + 1] * 0.587 + data[p + 2] * 0.114) | 0;
+          bg[i] = g;
+          lastMask[i] = 0;
+        }
+        bgReady = true;
+        statusEl.textContent = "Background captured.";
+      } else {
+        for (let i = 0, p = 0; i < count; i++, p += 4) {
+          const g = (data[p] * 0.299 + data[p + 1] * 0.587 + data[p + 2] * 0.114) | 0;
+          if (lr > 0) {
+            bg[i] = bg[i] * (1 - lr) + g * lr;
+          }
+          const diff = Math.abs(g - bg[i]);
+          diffSum += diff;
+          let v = useDebug ? Math.min(255, diff | 0) : (diff >= threshold ? 255 : 0);
+          if (useInvert) v = 255 - v;
+          lastMask[i] = v;
+        }
+
+        const k = (+blur.value) | 0;
+        if (k >= 3 && (k % 2) === 1) {
+          const radius = (k - 1) / 2;
+          boxBlur(lastMask, lastMask, dims.computeW, dims.computeH, radius, blurTmp);
+        }
+      }
+
+      lastComputeMs = performance.now() - t1;
+      const diffAvg = bgReady ? (diffSum / count).toFixed(2) : "n/a";
+      calcEl.textContent =
+        `bg: ${bgReady ? "ready" : "init"} | learnRate: ${lr.toFixed(3)} | diffAvg: ${diffAvg}\n` +
+        `threshold: ${threshold} | compute: ${dims.computeW}x${dims.computeH} | every: ${n}`;
+    }
+
+    updateOutput();
+
+    const tEnd = performance.now();
+    lastFrameMs = tEnd - t0;
+
+    frames++;
+    if (tEnd - lastFpsT >= 500) {
+      fps = (frames * 1000 / (tEnd - lastFpsT)).toFixed(1);
+      frames = 0;
+      lastFpsT = tEnd;
+    }
+
+    perfEl.textContent = `fps(draw): ${fps} | frameMs: ${lastFrameMs.toFixed(1)} | computeMs(last): ${lastComputeMs.toFixed(1)} | computeEvery: ${n}`;
+
+    requestAnimationFrame(loop);
+  }
+
+  function stopAll() {
+    running = false;
+    stopBtn.disabled = true;
+    startBtn.disabled = false;
+    statusEl.textContent = "Stopped.";
+    try { if (stream) stream.getTracks().forEach(t => t.stop()); } catch {}
+    stream = null;
+  }
+
+  startBtn.addEventListener("click", async () => {
+    if (running) return;
+    startBtn.disabled = true;
+    statusEl.textContent = "Starting camera…";
+
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      vid.srcObject = stream;
+      await vid.play();
+    } catch (e) {
+      statusEl.textContent = `Camera failed: ${e?.message || e}`;
+      startBtn.disabled = false;
+      return;
+    }
+
+    const videoW = vid.videoWidth, videoH = vid.videoHeight;
+    if (!videoW || !videoH) {
+      statusEl.textContent = "No video size yet; try again.";
+      startBtn.disabled = false;
+      return;
+    }
+
+    dims = updateDims(videoW, videoH);
+    statusEl.textContent = "Background initializing…";
+    calcEl.textContent = "";
+
+    running = true;
+    stopBtn.disabled = false;
+    requestAnimationFrame(loop);
+  });
+
+  stopBtn.addEventListener("click", stopAll);
+  resetBtn.addEventListener("click", () => resetBackground("Background reset."));
+})();
+</script>
+</body>
+</html>

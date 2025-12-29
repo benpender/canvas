@@ -1,0 +1,790 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Stereo Webcam Depth Capture</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; padding: 0; background: #050505; overflow: hidden; font-family: "Segoe UI", Tahoma, sans-serif; }
+    #gl {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      display: block;
+      background: #050505;
+    }
+    #ui {
+      position: fixed;
+      left: 12px;
+      top: 12px;
+      z-index: 10;
+      color: #f5f5f5;
+      background: rgba(0, 0, 0, 0.55);
+      padding: 12px 14px;
+      border-radius: 12px;
+      min-width: 260px;
+      font-size: 13px;
+      line-height: 1.4;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+    }
+    #ui .title { font-weight: 600; margin-bottom: 6px; }
+    #ui details {
+      margin-top: 8px;
+      background: rgba(0,0,0,0.35);
+      padding: 8px 10px;
+      border-radius: 10px;
+    }
+    #ui summary { cursor: pointer; font-weight: 600; }
+    .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+    .row label { flex: 1 1 auto; }
+    .row input[type="range"] { width: 160px; }
+    .row .val { width: 60px; text-align: right; font-variant-numeric: tabular-nums; }
+    #stats { margin-top: 8px; color: #d4d4d4; font-size: 12px; }
+    #debug {
+      position: fixed;
+      right: 12px;
+      top: 12px;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    #debug.hidden { display: none; }
+    .dbgCanvas {
+      width: 320px;
+      height: auto;
+      border-radius: 10px;
+      outline: 1px solid rgba(255,255,255,0.18);
+      background: #111;
+    }
+    .dbgCanvas.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div class="title">Stereo Webcam Depth</div>
+    <div id="status">Waiting for camera...</div>
+
+    <details open>
+      <summary>Depth Controls</summary>
+      <div class="row">
+        <label for="maxDistance">Cutoff distance (ft)</label>
+        <input id="maxDistance" type="range" min="2" max="25" step="0.5" value="8" />
+        <span class="val" data-out="maxDistance">8.0</span>
+      </div>
+      <div class="row">
+        <label for="minDistance">Min distance (ft)</label>
+        <input id="minDistance" type="range" min="0.5" max="10" step="0.5" value="1.5" />
+        <span class="val" data-out="minDistance">1.5</span>
+      </div>
+      <div class="row">
+        <label for="baselineMm">Baseline (mm)</label>
+        <input id="baselineMm" type="range" min="30" max="120" step="1" value="65" />
+        <span class="val" data-out="baselineMm">65</span>
+      </div>
+      <div class="row">
+        <label for="cameraFov">Camera FOV (deg)</label>
+        <input id="cameraFov" type="range" min="30" max="90" step="1" value="55" />
+        <span class="val" data-out="cameraFov">55</span>
+      </div>
+      <div class="row">
+        <label for="depthScale">Depth scale</label>
+        <input id="depthScale" type="range" min="0.2" max="3" step="0.05" value="1" />
+        <span class="val" data-out="depthScale">1.00</span>
+      </div>
+    </details>
+
+    <details open>
+      <summary>Matching</summary>
+      <div class="row">
+        <label for="procScale">Proc scale</label>
+        <input id="procScale" type="range" min="0.2" max="0.6" step="0.05" value="0.25" />
+        <span class="val" data-out="procScale">0.25</span>
+      </div>
+      <div class="row">
+        <label for="maxDisparity">Max disparity (px)</label>
+        <input id="maxDisparity" type="range" min="8" max="96" step="1" value="32" />
+        <span class="val" data-out="maxDisparity">32</span>
+      </div>
+      <div class="row">
+        <label for="censusRadius">Census radius</label>
+        <input id="censusRadius" type="range" min="1" max="2" step="1" value="2" />
+        <span class="val" data-out="censusRadius">2</span>
+      </div>
+      <div class="row">
+        <label for="sampleStep">Sample step</label>
+        <input id="sampleStep" type="range" min="1" max="6" step="1" value="2" />
+        <span class="val" data-out="sampleStep">2</span>
+      </div>
+      <div class="row">
+        <label for="textureThresh">Texture threshold</label>
+        <input id="textureThresh" type="range" min="0" max="80" step="1" value="12" />
+        <span class="val" data-out="textureThresh">12</span>
+      </div>
+      <div class="row">
+        <label for="maxCost">Max cost</label>
+        <input id="maxCost" type="range" min="0.05" max="1" step="0.01" value="0.35" />
+        <span class="val" data-out="maxCost">0.35</span>
+      </div>
+      <div class="row">
+        <label for="minUniqueness">Min uniqueness</label>
+        <input id="minUniqueness" type="range" min="0" max="0.5" step="0.01" value="0.08" />
+        <span class="val" data-out="minUniqueness">0.08</span>
+      </div>
+      <div class="row">
+        <label for="lrCheck">Left/right check</label>
+        <input id="lrCheck" type="checkbox" checked />
+      </div>
+      <div class="row">
+        <label for="lrTolerance">LR tolerance (px)</label>
+        <input id="lrTolerance" type="range" min="0" max="4" step="1" value="1" />
+        <span class="val" data-out="lrTolerance">1</span>
+      </div>
+      <div class="row">
+        <label for="depthIntervalMs">Depth interval (ms)</label>
+        <input id="depthIntervalMs" type="range" min="0" max="300" step="10" value="120" />
+        <span class="val" data-out="depthIntervalMs">120</span>
+      </div>
+    </details>
+
+    <details open>
+      <summary>Stereo Align</summary>
+      <div class="row">
+        <label for="rightOffsetX">Right offset X (px)</label>
+        <input id="rightOffsetX" type="range" min="-60" max="60" step="1" value="0" />
+        <span class="val" data-out="rightOffsetX">0</span>
+      </div>
+      <div class="row">
+        <label for="rightOffsetY">Right offset Y (px)</label>
+        <input id="rightOffsetY" type="range" min="-60" max="60" step="1" value="0" />
+        <span class="val" data-out="rightOffsetY">0</span>
+      </div>
+    </details>
+
+    <details open>
+      <summary>Debug</summary>
+      <div class="row">
+        <label for="debugToggle">Show debug feeds</label>
+        <input id="debugToggle" type="checkbox" checked />
+      </div>
+      <div class="row">
+        <label for="depthToggle">Show depth map</label>
+        <input id="depthToggle" type="checkbox" checked />
+      </div>
+      <div class="row">
+        <label for="pointsToggle">Show point cloud</label>
+        <input id="pointsToggle" type="checkbox" checked />
+      </div>
+      <div class="row">
+        <label for="colorByDepth">Color by depth</label>
+        <input id="colorByDepth" type="checkbox" checked />
+      </div>
+      <div class="row">
+        <label for="swapStereo">Swap left/right</label>
+        <input id="swapStereo" type="checkbox" />
+      </div>
+      <div class="row">
+        <label for="reverseDisparity">Reverse disparity</label>
+        <input id="reverseDisparity" type="checkbox" />
+      </div>
+      <div class="row">
+        <label for="flipX">Flip X</label>
+        <input id="flipX" type="checkbox" />
+      </div>
+      <div class="row">
+        <label for="flipY">Flip Y</label>
+        <input id="flipY" type="checkbox" />
+      </div>
+      <div id="stats">points 0/0 | z -- ft | avg cost --</div>
+    </details>
+  </div>
+
+  <div id="debug">
+    <canvas id="leftView" class="dbgCanvas" width="320" height="180"></canvas>
+    <canvas id="rightView" class="dbgCanvas" width="320" height="180"></canvas>
+    <canvas id="depthView" class="dbgCanvas" width="320" height="180"></canvas>
+  </div>
+
+  <video id="video" playsinline muted style="display:none;"></video>
+  <canvas id="gl" width="1920" height="1080"></canvas>
+
+  <script type="module">
+    import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
+
+    const TARGET_WIDTH = 1920;
+    const TARGET_HEIGHT = 1080;
+    const METERS_PER_FOOT = 0.3048;
+
+    const CFG = {
+      procScale: 0.25,
+      maxDisparity: 32,
+      censusRadius: 2,
+      sampleStep: 2,
+      baselineMeters: 0.065,
+      cameraFov: 55,
+      depthIntervalMs: 120,
+      minDistanceFeet: 1.5,
+      maxDistanceFeet: 8,
+      depthScale: 1.0,
+      textureThresh: 12,
+      maxCost: 0.35,
+      minUniqueness: 0.08,
+      lrCheck: true,
+      lrTolerance: 1,
+      rightOffsetX: 0,
+      rightOffsetY: 0,
+      swapStereo: false,
+      reverseDisparity: false,
+      flipX: false,
+      flipY: false,
+      showPoints: true,
+      showDepthMap: true,
+      showDebug: true,
+      colorByDepth: true
+    };
+
+    const statusEl = document.getElementById('status');
+    const statsEl = document.getElementById('stats');
+    const debugEl = document.getElementById('debug');
+
+    const video = document.getElementById('video');
+    const glCanvas = document.getElementById('gl');
+    const leftCanvas = document.getElementById('leftView');
+    const rightCanvas = document.getElementById('rightView');
+    const depthView = document.getElementById('depthView');
+
+    const leftCtx = leftCanvas.getContext('2d', { willReadFrequently: true });
+    const rightCtx = rightCanvas.getContext('2d', { willReadFrequently: true });
+    const depthViewCtx = depthView.getContext('2d');
+    depthViewCtx.imageSmoothingEnabled = false;
+
+    let renderer, scene, camera, points, geometry;
+    let procLeftCanvas, procRightCanvas, procLeftCtx, procRightCtx;
+    let depthCanvas, depthCtx;
+    let leftGray, rightGray, leftCensus, rightCensus, leftTexture;
+
+    let procW = 0;
+    let procH = 0;
+    let stereoW = 0;
+    let stereoH = 0;
+    let samplePoints = [];
+    let lastDepthTime = 0;
+    let fPixels = 1;
+    let rebuildQueued = false;
+    let censusBitCount = 0;
+    let activeMaxDisparity = 0;
+
+    const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+    const popcount32 = (value) => {
+      let v = value >>> 0;
+      v -= (v >>> 1) & 0x55555555;
+      v = (v & 0x33333333) + ((v >>> 2) & 0x33333333);
+      return (((v + (v >>> 4)) & 0x0F0F0F0F) * 0x01010101) >>> 24;
+    };
+
+    const updateFpixels = () => {
+      if (!procH) return;
+      fPixels = (procH * 0.5) / Math.tan(THREE.MathUtils.degToRad(CFG.cameraFov * 0.5));
+    };
+
+    const updateCameraFov = () => {
+      if (camera) {
+        camera.fov = CFG.cameraFov;
+        camera.updateProjectionMatrix();
+      }
+      updateFpixels();
+    };
+
+    const queueRebuild = () => {
+      if (!video.videoWidth || rebuildQueued) return;
+      rebuildQueued = true;
+      requestAnimationFrame(() => {
+        rebuildQueued = false;
+        rebuildProcessing();
+      });
+    };
+
+    const bindRange = (id, key, options = {}) => {
+      const el = document.getElementById(id);
+      if (!el) return null;
+      const out = document.querySelector(`[data-out="${id}"]`);
+      const parse = options.parse || parseFloat;
+      const format = options.format || ((v) => v.toFixed(options.decimals ?? 2));
+      const update = () => {
+        const raw = parse(el.value);
+        if (!Number.isFinite(raw)) return;
+        CFG[key] = raw;
+        if (out) out.textContent = format(raw);
+        if (options.onChange) options.onChange(raw);
+      };
+      el.addEventListener('input', update);
+      update();
+      return el;
+    };
+
+    const bindCheckbox = (id, key, onChange) => {
+      const el = document.getElementById(id);
+      if (!el) return null;
+      const update = () => {
+        CFG[key] = el.checked;
+        if (onChange) onChange(el.checked);
+      };
+      el.addEventListener('change', update);
+      update();
+      return el;
+    };
+
+    const setupUI = () => {
+      bindRange('maxDistance', 'maxDistanceFeet', { decimals: 1 });
+      bindRange('minDistance', 'minDistanceFeet', { decimals: 1 });
+      bindRange('baselineMm', 'baselineMeters', {
+        parse: (v) => parseFloat(v) / 1000,
+        format: (v) => (v * 1000).toFixed(0)
+      });
+      bindRange('cameraFov', 'cameraFov', { decimals: 0, onChange: updateCameraFov });
+      bindRange('depthScale', 'depthScale', { decimals: 2 });
+
+      bindRange('procScale', 'procScale', { decimals: 2, onChange: queueRebuild });
+      bindRange('maxDisparity', 'maxDisparity', {
+        parse: (v) => parseInt(v, 10),
+        format: (v) => `${v}`,
+        onChange: queueRebuild
+      });
+      bindRange('censusRadius', 'censusRadius', {
+        parse: (v) => parseInt(v, 10),
+        format: (v) => `${v}`,
+        onChange: queueRebuild
+      });
+      bindRange('sampleStep', 'sampleStep', {
+        parse: (v) => parseInt(v, 10),
+        format: (v) => `${v}`,
+        onChange: queueRebuild
+      });
+      bindRange('textureThresh', 'textureThresh', {
+        parse: (v) => parseInt(v, 10),
+        format: (v) => `${v}`
+      });
+      bindRange('maxCost', 'maxCost', { decimals: 2 });
+      bindRange('minUniqueness', 'minUniqueness', { decimals: 2 });
+      bindCheckbox('lrCheck', 'lrCheck');
+      bindRange('lrTolerance', 'lrTolerance', {
+        parse: (v) => parseInt(v, 10),
+        format: (v) => `${v}`
+      });
+      bindRange('depthIntervalMs', 'depthIntervalMs', {
+        parse: (v) => parseInt(v, 10),
+        format: (v) => `${v}`
+      });
+      bindRange('rightOffsetX', 'rightOffsetX', {
+        parse: (v) => parseInt(v, 10),
+        format: (v) => `${v}`
+      });
+      bindRange('rightOffsetY', 'rightOffsetY', {
+        parse: (v) => parseInt(v, 10),
+        format: (v) => `${v}`
+      });
+
+      bindCheckbox('debugToggle', 'showDebug', (value) => {
+        debugEl.classList.toggle('hidden', !value);
+      });
+      bindCheckbox('depthToggle', 'showDepthMap', (value) => {
+        depthView.classList.toggle('hidden', !value);
+      });
+      bindCheckbox('pointsToggle', 'showPoints', (value) => {
+        if (points) points.visible = value;
+      });
+      bindCheckbox('colorByDepth', 'colorByDepth');
+      bindCheckbox('swapStereo', 'swapStereo');
+      bindCheckbox('reverseDisparity', 'reverseDisparity', queueRebuild);
+      bindCheckbox('flipX', 'flipX');
+      bindCheckbox('flipY', 'flipY');
+    };
+
+    const setupThree = () => {
+      renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true });
+      renderer.setPixelRatio(1);
+      renderer.setSize(TARGET_WIDTH, TARGET_HEIGHT, false);
+      renderer.setClearColor(0x050505, 1);
+
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(CFG.cameraFov, TARGET_WIDTH / TARGET_HEIGHT, 0.1, 30);
+      camera.position.set(0, 0, 0);
+      camera.lookAt(0, 0, -1);
+
+      const axes = new THREE.AxesHelper(0.5);
+      scene.add(axes);
+    };
+
+    const setupVideo = async () => {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('getUserMedia is not supported in this browser.');
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 3840 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30 }
+        },
+        audio: false
+      });
+
+      video.srcObject = stream;
+      await video.play();
+      await new Promise((resolve) => {
+        if (video.readyState >= 1) resolve();
+        video.addEventListener('loadedmetadata', resolve, { once: true });
+      });
+
+      statusEl.textContent = `Camera ready: ${video.videoWidth}x${video.videoHeight}`;
+    };
+
+    const drawFrame = (ctx, sx, sy, sw, sh, dw, dh, dx = 0, dy = 0) => {
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      const fx = CFG.flipX ? -1 : 1;
+      const fy = CFG.flipY ? -1 : 1;
+      const tx = CFG.flipX ? dw + dx : dx;
+      const ty = CFG.flipY ? dh + dy : dy;
+      ctx.setTransform(fx, 0, 0, fy, tx, ty);
+      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, dw, dh);
+      ctx.restore();
+    };
+
+    const drawStereoTo = (ctxLeft, ctxRight, dw, dh) => {
+      const leftX = CFG.swapStereo ? stereoW : 0;
+      const rightX = CFG.swapStereo ? 0 : stereoW;
+      const scaleX = dw / stereoW;
+      const scaleY = dh / stereoH;
+      const rightDx = CFG.rightOffsetX * scaleX;
+      const rightDy = CFG.rightOffsetY * scaleY;
+      drawFrame(ctxLeft, leftX, 0, stereoW, stereoH, dw, dh, 0, 0);
+      drawFrame(ctxRight, rightX, 0, stereoW, stereoH, dw, dh, rightDx, rightDy);
+    };
+
+    const buildSamplePoints = () => {
+      samplePoints = [];
+      const radius = CFG.censusRadius;
+      activeMaxDisparity = Math.max(1, Math.min(CFG.maxDisparity, procW - radius - 1));
+      censusBitCount = (radius * 2 + 1) * (radius * 2 + 1) - 1;
+
+      const startX = radius + (CFG.reverseDisparity ? 0 : activeMaxDisparity);
+      const endX = procW - radius - (CFG.reverseDisparity ? activeMaxDisparity : 0);
+
+      for (let y = radius; y < procH - radius; y += CFG.sampleStep) {
+        for (let x = startX; x < endX; x += CFG.sampleStep) {
+          samplePoints.push({ x, y });
+        }
+      }
+    };
+
+    const rebuildProcessing = () => {
+      if (!video.videoWidth) return;
+      if (points) {
+        scene.remove(points);
+        points.geometry.dispose();
+        points.material.dispose();
+      }
+      setupProcessing();
+    };
+
+    const setupProcessing = () => {
+      stereoW = Math.floor(video.videoWidth / 2);
+      stereoH = video.videoHeight;
+      if (stereoW <= 0 || stereoH <= 0) {
+        throw new Error('Invalid stereo video dimensions.');
+      }
+
+      procW = Math.max(40, Math.floor(stereoW * CFG.procScale));
+      procH = Math.max(30, Math.floor(stereoH * CFG.procScale));
+      procLeftCanvas = document.createElement('canvas');
+      procRightCanvas = document.createElement('canvas');
+      procLeftCanvas.width = procW;
+      procLeftCanvas.height = procH;
+      procRightCanvas.width = procW;
+      procRightCanvas.height = procH;
+      procLeftCtx = procLeftCanvas.getContext('2d', { willReadFrequently: true });
+      procRightCtx = procRightCanvas.getContext('2d', { willReadFrequently: true });
+      procLeftCtx.imageSmoothingEnabled = false;
+      procRightCtx.imageSmoothingEnabled = false;
+
+      depthCanvas = document.createElement('canvas');
+      depthCanvas.width = procW;
+      depthCanvas.height = procH;
+      depthCtx = depthCanvas.getContext('2d');
+      depthCtx.imageSmoothingEnabled = false;
+
+      const debugW = leftCanvas.width;
+      const debugH = Math.round((stereoH / stereoW) * debugW);
+      leftCanvas.height = debugH;
+      rightCanvas.height = debugH;
+      depthView.height = debugH;
+
+      updateFpixels();
+      buildSamplePoints();
+
+      leftGray = new Uint8Array(procW * procH);
+      rightGray = new Uint8Array(procW * procH);
+      leftCensus = new Uint32Array(procW * procH);
+      rightCensus = new Uint32Array(procW * procH);
+      leftTexture = new Uint8Array(procW * procH);
+
+      const pointCount = samplePoints.length;
+      const positions = new Float32Array(pointCount * 3);
+      const colors = new Float32Array(pointCount * 3);
+
+      geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+      const material = new THREE.PointsMaterial({
+        size: 0.02,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.9
+      });
+      points = new THREE.Points(geometry, material);
+      points.visible = CFG.showPoints;
+      scene.add(points);
+
+      statusEl.textContent = `Camera ready: ${video.videoWidth}x${video.videoHeight} | stereo ${stereoW}x${stereoH}`;
+    };
+
+    const fillGray = (srcData, outGray) => {
+      for (let i = 0, p = 0; i < srcData.length; i += 4, p++) {
+        outGray[p] = (srcData[i] * 0.299 + srcData[i + 1] * 0.587 + srcData[i + 2] * 0.114) | 0;
+      }
+    };
+
+    const computeTexture = (gray, outTexture) => {
+      outTexture.fill(0);
+      for (let y = 1; y < procH - 1; y++) {
+        const row = y * procW;
+        const rowUp = row - procW;
+        const rowDown = row + procW;
+        for (let x = 1; x < procW - 1; x++) {
+          const gx = Math.abs(gray[row + x + 1] - gray[row + x - 1]);
+          const gy = Math.abs(gray[rowDown + x] - gray[rowUp + x]);
+          outTexture[row + x] = Math.min(255, gx + gy);
+        }
+      }
+    };
+
+    const computeCensus = (gray, outBits, radius) => {
+      outBits.fill(0);
+      for (let y = radius; y < procH - radius; y++) {
+        for (let x = radius; x < procW - radius; x++) {
+          const center = gray[y * procW + x];
+          let bits = 0;
+          let bit = 0;
+          for (let dy = -radius; dy <= radius; dy++) {
+            const row = (y + dy) * procW;
+            for (let dx = -radius; dx <= radius; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              const v = gray[row + x + dx];
+              if (v < center) bits |= (1 << bit);
+              bit++;
+            }
+          }
+          outBits[y * procW + x] = bits >>> 0;
+        }
+      }
+    };
+
+    const computeDepth = () => {
+      drawStereoTo(procLeftCtx, procRightCtx, procW, procH);
+
+      const leftImage = procLeftCtx.getImageData(0, 0, procW, procH);
+      const rightImage = procRightCtx.getImageData(0, 0, procW, procH);
+      const leftData = leftImage.data;
+      const rightData = rightImage.data;
+
+      fillGray(leftData, leftGray);
+      fillGray(rightData, rightGray);
+      computeTexture(leftGray, leftTexture);
+
+      computeCensus(leftGray, leftCensus, CFG.censusRadius);
+      computeCensus(rightGray, rightCensus, CFG.censusRadius);
+
+      const positions = geometry.attributes.position.array;
+      const colors = geometry.attributes.color.array;
+
+      const minFeet = Math.min(CFG.minDistanceFeet, CFG.maxDistanceFeet);
+      const maxFeet = Math.max(CFG.minDistanceFeet, CFG.maxDistanceFeet);
+      const minDistanceMeters = Math.max(0.05, minFeet * METERS_PER_FOOT);
+      const maxDistanceMeters = Math.max(minDistanceMeters + 0.05, maxFeet * METERS_PER_FOOT);
+      const depthRange = Math.max(0.01, maxDistanceMeters - minDistanceMeters);
+
+      let out = 0;
+      let validCount = 0;
+      let minZ = Infinity;
+      let maxZ = 0;
+      let avgCostSum = 0;
+
+      const depthImage = CFG.showDepthMap ? depthCtx.createImageData(procW, procH) : null;
+      const depthData = depthImage ? depthImage.data : null;
+      const radius = CFG.censusRadius;
+
+      for (let i = 0; i < samplePoints.length; i++) {
+        const { x, y } = samplePoints[i];
+        const idx = y * procW + x;
+
+        if (CFG.textureThresh > 0 && leftTexture[idx] < CFG.textureThresh) {
+          positions[out] = 0;
+          positions[out + 1] = 0;
+          positions[out + 2] = 1000;
+          colors[out] = 0;
+          colors[out + 1] = 0;
+          colors[out + 2] = 0;
+          out += 3;
+          continue;
+        }
+
+        const leftBits = leftCensus[idx];
+        let bestD = 0;
+        let bestCost = Infinity;
+        let secondBest = Infinity;
+
+        for (let d = 0; d <= activeMaxDisparity; d++) {
+          const matchX = CFG.reverseDisparity ? x + d : x - d;
+          const rightBits = rightCensus[y * procW + matchX];
+          const cost = popcount32(leftBits ^ rightBits);
+          if (cost < bestCost) {
+            secondBest = bestCost;
+            bestCost = cost;
+            bestD = d;
+          } else if (cost < secondBest) {
+            secondBest = cost;
+          }
+        }
+
+        let zMeters = Infinity;
+        const bestNorm = censusBitCount ? bestCost / censusBitCount : 1;
+        const secondNorm = censusBitCount ? secondBest / censusBitCount : 1;
+        const uniqueness = secondNorm - bestNorm;
+
+        if (bestD > 0 && bestNorm <= CFG.maxCost && uniqueness >= CFG.minUniqueness) {
+          if (CFG.lrCheck) {
+            const matchX = CFG.reverseDisparity ? x + bestD : x - bestD;
+            let bestBackD = -1;
+            let bestBackCost = Infinity;
+            for (let d = 0; d <= activeMaxDisparity; d++) {
+              const leftX = CFG.reverseDisparity ? matchX - d : matchX + d;
+              if (leftX < radius || leftX >= procW - radius) continue;
+              const leftBackBits = leftCensus[y * procW + leftX];
+              const rightBits = rightCensus[y * procW + matchX];
+              const cost = popcount32(leftBackBits ^ rightBits);
+              if (cost < bestBackCost) {
+                bestBackCost = cost;
+                bestBackD = d;
+              }
+            }
+            if (bestBackD < 0 || Math.abs(bestBackD - bestD) > CFG.lrTolerance) {
+              bestD = 0;
+            }
+          }
+        }
+
+        if (bestD > 0 && bestNorm <= CFG.maxCost && uniqueness >= CFG.minUniqueness) {
+          zMeters = (fPixels * CFG.baselineMeters) / bestD;
+          zMeters *= CFG.depthScale;
+        }
+
+        const isValid = Number.isFinite(zMeters)
+          && zMeters >= minDistanceMeters
+          && zMeters <= maxDistanceMeters;
+
+        if (!isValid) {
+          positions[out] = 0;
+          positions[out + 1] = 0;
+          positions[out + 2] = 1000;
+          colors[out] = 0;
+          colors[out + 1] = 0;
+          colors[out + 2] = 0;
+        } else {
+          const xWorld = ((x - procW * 0.5) / fPixels) * zMeters;
+          const yWorld = (-(y - procH * 0.5) / fPixels) * zMeters;
+          positions[out] = xWorld;
+          positions[out + 1] = yWorld;
+          positions[out + 2] = -zMeters;
+
+          const depthValue = clamp((maxDistanceMeters - zMeters) / depthRange, 0, 1);
+          if (CFG.colorByDepth) {
+            colors[out] = depthValue;
+            colors[out + 1] = depthValue;
+            colors[out + 2] = depthValue;
+          } else {
+            const colorIndex = (y * procW + x) * 4;
+            colors[out] = leftData[colorIndex] / 255;
+            colors[out + 1] = leftData[colorIndex + 1] / 255;
+            colors[out + 2] = leftData[colorIndex + 2] / 255;
+          }
+
+          validCount++;
+          minZ = Math.min(minZ, zMeters);
+          maxZ = Math.max(maxZ, zMeters);
+          avgCostSum += bestNorm;
+
+          if (depthData) {
+            const di = (y * procW + x) * 4;
+            const v = Math.round(depthValue * 255);
+            depthData[di] = v;
+            depthData[di + 1] = v;
+            depthData[di + 2] = v;
+            depthData[di + 3] = 255;
+          }
+        }
+
+        out += 3;
+      }
+
+      geometry.attributes.position.needsUpdate = true;
+      geometry.attributes.color.needsUpdate = true;
+
+      if (depthImage) {
+        depthCtx.putImageData(depthImage, 0, 0);
+        depthViewCtx.drawImage(depthCanvas, 0, 0, depthView.width, depthView.height);
+      }
+
+      const minFt = validCount ? (minZ / METERS_PER_FOOT).toFixed(1) : '--';
+      const maxFt = validCount ? (maxZ / METERS_PER_FOOT).toFixed(1) : '--';
+      const avgCost = validCount ? (avgCostSum / validCount).toFixed(2) : '--';
+      statsEl.textContent = `points ${validCount}/${samplePoints.length} | z ${minFt}-${maxFt} ft | avg cost ${avgCost}`;
+    };
+
+    const drawDebug = () => {
+      if (!CFG.showDebug) return;
+      drawStereoTo(leftCtx, rightCtx, leftCanvas.width, leftCanvas.height);
+    };
+
+    const tick = (now) => {
+      requestAnimationFrame(tick);
+      if (!video.videoWidth || !points) return;
+
+      drawDebug();
+      if (now - lastDepthTime >= CFG.depthIntervalMs) {
+        computeDepth();
+        lastDepthTime = now;
+      }
+
+      renderer.render(scene, camera);
+    };
+
+    const start = async () => {
+      setupThree();
+      setupUI();
+      await setupVideo();
+      setupProcessing();
+      requestAnimationFrame(tick);
+    };
+
+    start().catch((err) => {
+      console.error(err);
+      statusEl.textContent = `Error: ${err.message}`;
+    });
+  </script>
+</body>
+</html>

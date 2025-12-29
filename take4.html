@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Pro Dancer Silhouette - BlazePose</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+    <style>
+        body { background: #000; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin: 0; padding: 20px; }
+        .canvas-container { position: relative; width: 800px; height: 450px; background: #000; border: 2px solid #333; box-shadow: 0 0 20px rgba(255,255,255,0.1); }
+        canvas { width: 100%; height: 100%; }
+        .ui { background: #1a1a1a; padding: 15px; border-radius: 8px; margin-top: 15px; width: 800px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; border: 1px solid #333; }
+        .debug-panel { font-size: 11px; color: #666; }
+        #debugCanvas { width: 160px; border: 1px solid #444; margin-top: 5px; }
+        button { padding: 12px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; }
+        button:hover { background: #0056b3; }
+    </style>
+</head>
+<body>
+
+    <div class="canvas-container">
+        <canvas id="output_canvas"></canvas>
+    </div>
+
+    <div class="ui">
+        <div style="display: flex; flex-direction: column; gap: 15px;">
+            <button id="startBtn">ACTIVATE DANCE MASK</button>
+            <label style="font-size: 13px;">Silhouette Edge Smoothing: 
+                <input type="range" id="smooth" min="0" max="1" step="0.1" value="0.7">
+            </label>
+            <p id="status" style="color: #0f0; font-size: 12px; margin: 0;">Ready to start.</p>
+        </div>
+        
+        <div class="debug-panel">
+            <strong>AI INPUT (Upright & Cropped)</strong><br>
+            <canvas id="debugCanvas"></canvas>
+            <p id="camDetails">Detecting resolution...</p>
+        </div>
+    </div>
+
+    <video id="input_video" style="display:none" playsinline></video>
+
+<script>
+const videoElement = document.getElementById('input_video');
+const canvasElement = document.getElementById('output_canvas');
+const canvasCtx = canvasElement.getContext('2d');
+const debugCanvas = document.getElementById('debugCanvas');
+const debugCtx = debugCanvas.getContext('2d');
+const statusText = document.getElementById('camDetails');
+
+// The internal "Cutter" canvas
+const procCanvas = document.createElement('canvas');
+const procCtx = procCanvas.getContext('2d');
+
+function onResults(results) {
+    if (!results.segmentationMask) return;
+
+    canvasElement.width = procCanvas.width;
+    canvasElement.height = procCanvas.height;
+
+    // 1. Clear background to Black
+    canvasCtx.save();
+    canvasCtx.fillStyle = '#000000';
+    canvasCtx.fillRect(0, 0, canvasElement.width, canvasElement.height);
+
+    // 2. Draw the segmentation mask
+    // BlazePose provides a cleaner, point-guided mask
+    canvasCtx.globalCompositeOperation = 'destination-in';
+    canvasCtx.drawImage(results.segmentationMask, 0, 0, canvasElement.width, canvasElement.height);
+
+    // 3. Force the person area to be Pure White
+    canvasCtx.globalCompositeOperation = 'destination-over';
+    canvasCtx.fillStyle = '#FFFFFF';
+    canvasCtx.fillRect(0, 0, canvasElement.width, canvasElement.height);
+
+    canvasCtx.restore();
+
+    // Update Debug View
+    debugCanvas.width = 160;
+    debugCanvas.height = (procCanvas.height / procCanvas.width) * 160;
+    debugCtx.drawImage(procCanvas, 0, 0, debugCanvas.width, debugCanvas.height);
+}
+
+// INITIALIZE BLAZEPOSE
+const pose = new Pose({locateFile: (file) => {
+  return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+}});
+
+pose.setOptions({
+  modelComplexity: 1,      // 0 = Lite, 1 = Full, 2 = Heavy
+  smoothLandmarks: true,
+  enableSegmentation: true,
+  smoothSegmentation: true,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
+pose.onResults(onResults);
+
+document.getElementById('startBtn').onclick = async () => {
+    try {
+        document.getElementById('status').innerText = "Starting Camera...";
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 2560 }, height: { ideal: 720 } }
+        });
+        videoElement.srcObject = stream;
+        
+        videoElement.onloadedmetadata = () => {
+            videoElement.play();
+            const w = videoElement.videoWidth;
+            const h = videoElement.videoHeight;
+            statusText.innerText = `Source: ${w}x${h} | Cropping Left Eye`;
+
+            procCanvas.width = w / 2;
+            procCanvas.height = h;
+
+            const sendToAI = async () => {
+                if (videoElement.paused || videoElement.ended) return;
+                
+                // CROP + VERTICAL FLIP
+                procCtx.save();
+                procCtx.translate(0, h);
+                procCtx.scale(1, -1);
+                procCtx.drawImage(videoElement, 0, 0, w/2, h, 0, 0, w/2, h);
+                procCtx.restore();
+
+                await pose.send({image: procCanvas});
+                requestAnimationFrame(sendToAI);
+            };
+            sendToAI();
+            document.getElementById('status').innerText = "DANCE MODE ACTIVE";
+        };
+    } catch (e) {
+        alert("Camera error: " + e.message);
+    }
+};
+</script>
+</body>
+</html>
