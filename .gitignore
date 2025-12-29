@@ -1,7 +1,26 @@
+# PlatformIO / Arduino
 .pio/
 .platformio/
+
+# Node / Web
 node_modules/
-.vscode/
+
+# Python virtual environments
+venv/
+**/venv/
+.env/
+**/.env/
+
+# Python cache
 __pycache__/
+**/__pycache__/
 *.pyc
+
+# MediaPipe cache
+.mediapipe/
+
+# VS Code
+.vscode/
+
+# OS junk
 .DS_Store
