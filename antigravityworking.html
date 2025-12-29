@@ -211,14 +211,21 @@
         let pose = null;
         let webcamActive = false;
         let webcamButton = null;
-        let webcamStatus = null;
+        const webcamInfo = { status: 'Idle' };
+        let startBtnCtrl = null;
+        let stopBtnCtrl = null;
 
         const updateWebcamStatus = (text, isError = false) => {
-
-            if (!webcamStatus) return;
-            webcamStatus.textContent = text;
-            webcamStatus.dataset.state = isError ? 'error' : 'ok';
-
+            webcamInfo.status = text;
+            if (startBtnCtrl && startBtnCtrl.disable) {
+                if (text.includes('Requesting') || text.includes('Source')) {
+                    startBtnCtrl.disable();
+                    if (stopBtnCtrl && stopBtnCtrl.enable) stopBtnCtrl.enable();
+                } else {
+                    startBtnCtrl.enable();
+                    if (stopBtnCtrl && stopBtnCtrl.disable) stopBtnCtrl.disable();
+                }
+            }
         };
 
         const onPoseResults = (results) => {
@@ -529,32 +536,60 @@
             attractor.orientation.copy(imuAxis);
         };
 
+        const stopWebcam = () => {
+            webcamActive = false;
+            if (videoElement) {
+                videoElement.pause();
+                if (videoElement.srcObject) {
+                    videoElement.srcObject.getTracks().forEach(track => track.stop());
+                    videoElement.srcObject = null;
+                }
+            }
+            updateWebcamStatus('Stopped');
+            if (webcamButton) webcamButton.disabled = false;
+        };
+
         const setupWebcamControls = () => {
 
-            const profilerRoot = renderer?.inspector?.domElement;
-            if (!profilerRoot) return;
-
-            const panel = profilerRoot.querySelector('#profiler-panel');
-            if (!panel || panel.querySelector('#webcam-controls')) return;
-
-            const header = panel.querySelector('.profiler-header');
-            if (!header) return;
-
-            const row = document.createElement('div');
-            row.id = 'webcam-controls';
+            let container = document.getElementById('webcam-overlay');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'webcam-overlay';
+                container.style.position = 'absolute';
+                container.style.top = '10px';
+                container.style.left = '10px';
+                container.style.zIndex = '1000';
+                container.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+                container.style.padding = '10px';
+                container.style.borderRadius = '8px';
+                container.style.display = 'flex';
+                container.style.alignItems = 'center';
+                container.style.gap = '10px';
+                document.body.appendChild(container);
+            }
 
             webcamButton = document.createElement('button');
             webcamButton.id = 'webcam-start-btn';
-            webcamButton.textContent = 'Start Webcam Mask';
+            webcamButton.textContent = 'Start Webcam';
+            webcamButton.style.padding = '5px 10px';
+            webcamButton.style.cursor = 'pointer';
+
+            const stopButton = document.createElement('button');
+            stopButton.id = 'webcam-stop-btn';
+            stopButton.textContent = 'Stop Webcam';
+            stopButton.style.padding = '5px 10px';
+            stopButton.style.cursor = 'pointer';
 
             webcamStatus = document.createElement('span');
             webcamStatus.textContent = 'Idle';
+            webcamStatus.style.color = '#fff';
+            webcamStatus.style.fontFamily = 'monospace';
             webcamStatus.dataset.state = 'ok';
 
             webcamButton.addEventListener('click', startWebcam);
+            stopButton.addEventListener('click', stopWebcam);
 
-            row.append(webcamButton, webcamStatus);
-            panel.insertBefore(row, header.nextSibling);
+            container.append(webcamButton, stopButton, webcamStatus);
 
         };
 
@@ -587,7 +622,7 @@
 
             await renderer.init();
 
-            setupWebcamControls();
+
 
             controls = new OrbitControls(camera, renderer.domElement);
             controls.enableDamping = true;
@@ -919,18 +954,28 @@
 
             const webcamGroup = renderer.inspector.parameters.createGroup('Webcam Settings');
 
-            webcamGroup.add(webcamConfig, 'showVideo').name('Show Video').onChange(updateDebugHelpers);
-            webcamGroup.add(webcamConfig, 'showOutline').name('Show Outline').onChange(updateDebugHelpers);
-            webcamGroup.add(webcamConfig, 'videoOpacity', 0, 1).name('Video Opacity').onChange(val => {
+            webcamGroup.add(webcamConfig, 'showVideo').name('Show Video').listen().onChange(updateDebugHelpers);
+            webcamGroup.add(webcamConfig, 'showOutline').name('Show Outline').listen().onChange(updateDebugHelpers);
+            webcamGroup.add(webcamConfig, 'videoOpacity', 0, 1).name('Video Opacity').listen().onChange(val => {
                 if (webcamConfig.showVideo) maskSprite.material.opacity = val;
             });
-            webcamGroup.add(webcamConfig, 'spriteScale', 1, 20).name('Scale').onChange(applyCropConfig);
+            webcamGroup.add(webcamConfig, 'spriteScale', 1, 20).name('Scale').listen().onChange(applyCropConfig);
 
             webcamGroup.add(webcamConfig, 'cropMode', ['full', 'left', 'right'])
                 .name('Crop Mode')
+                .listen()
                 .onChange(() => {
                     applyCropConfig();
                 });
+
+            // webcamGroup.add(webcamInfo, 'status').name('Status').listen();
+            startBtnCtrl = webcamGroup.add({ start: startWebcam }, 'start').name('Start Webcam');
+            stopBtnCtrl = webcamGroup.add({ stop: stopWebcam }, 'stop').name('Stop Webcam');
+            // stopBtnCtrl.disable(); // .disable() might not be supported
+
+            // Force initial state update
+            applyCropConfig();
+            updateDebugHelpers();
 
             const statusGroup = renderer.inspector.parameters.createGroup('Attractor Status');
             statusState = { controlsMode: attractors[0].controls.mode };
