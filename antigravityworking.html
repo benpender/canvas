@@ -343,7 +343,7 @@
                 const loop = async () => {
                     if (!webcamActive || videoElement.paused || videoElement.ended) {
                         if (frameCount % 60 === 0) console.log('Loop paused/ended state:', { webcamActive, paused: videoElement.paused, ended: videoElement.ended });
-                        if (webcamActive && !videoElement.ended) { // Resume attempts
+                        if (webcamActive && !videoElement.ended) {
                             requestAnimationFrame(loop);
                         }
                         return;
@@ -379,14 +379,13 @@
                     } else {
                         // Send to MediaPipe Pose
                         try {
-                            if (pose) await pose.send({ image: procCanvas });
-                            else requestAnimationFrame(loop);
-
-                            requestAnimationFrame(loop); // Ensure loop continues
+                            await pose.send({ image: procCanvas });
+                            requestAnimationFrame(loop);
                         } catch (err) {
                             console.error('Pose send error:', err);
-                            // Don't kill loop on single frame error
-                            requestAnimationFrame(loop);
+                            updateWebcamStatus(`Pose error: ${err.message}`, true);
+                            webcamActive = false;
+                            if (startBtnCtrl && startBtnCtrl.enable) startBtnCtrl.enable();
                         }
                     }
                 };
