@@ -177,7 +177,13 @@ while True:
                 0
             )
     else:
-        mask = np.zeros((h, w), dtype=np.uint8)
+        # No detection = All background (White)
+        mask = np.ones((h, w), dtype=np.uint8) * 255
+
+    # --------------------------------------------------------
+    # Invert Mask: Human (Black) / Background (White)
+    # --------------------------------------------------------
+    mask = cv2.bitwise_not(mask)
 
     # --------------------------------------------------------
     # IMPORTANT: convert GRAY → BGR (macOS / OBS requirement)

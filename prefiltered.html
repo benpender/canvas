@@ -1,0 +1,1222 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <title>three.js webgpu - attractors particles with webcam mask</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            color: #fff;
+            font-family: sans-serif;
+        }
+
+        a {
+            color: #fff;
+        }
+
+        #maskCanvas {
+            position: fixed;
+            left: 12px;
+            bottom: 12px;
+            width: 160px;
+            height: auto;
+            border: 1px solid #333;
+            z-index: 1000;
+            display: none;
+            opacity: 0.8;
+            pointer-events: none;
+        }
+
+        #webcam-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 10px;
+            background: var(--profiler-header-bg, rgba(42, 42, 51, 0.7));
+            border-bottom: 1px solid var(--profiler-border, #444);
+            font-family: var(--font-family, sans-serif);
+        }
+
+        #webcam-controls button {
+            background: #0a84ff;
+            border: none;
+            color: #fff;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        #webcam-controls button:disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+
+        #webcam-controls span {
+            font-size: 11px;
+            color: var(--text-secondary, #aaa);
+        }
+
+        #webcam-controls span[data-state="error"] {
+            color: #ff7a7a;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="maskCanvas" width="640" height="360"></canvas>
+    <video id="input_video" autoplay playsinline muted
+        style="position: absolute; width: 320px; height: 180px; opacity: 1; z-index: 2000; bottom: 0; right: 0; border: 2px solid cyan;"></video>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+
+    <script type="importmap">
+            {
+                "imports": {
+                    "three": "./three/build/three.webgpu.js",
+                    "three/webgpu": "./three/build/three.webgpu.js",
+                    "three/tsl": "./three/build/three.tsl.js",
+                    "three/addons/": "./three/addons/"
+                }
+            }
+        </script>
+
+    <script type="module">
+
+        import * as THREE from 'three/webgpu';
+        import { atan2, cameraViewMatrix, float, If, PI, color, cos, instanceIndex, Loop, mix, mod, sin, instancedArray, Fn, uint, uniform, uniformArray, hash, uv, vec3, vec4, texture } from 'three/tsl';
+
+        import { Inspector } from 'three/addons/inspector/Inspector.js';
+
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { TransformControls } from 'three/addons/controls/TransformControls.js';
+
+        const videoElement = document.getElementById('input_video');
+        const maskCanvas = document.getElementById('maskCanvas');
+        const maskCtx = maskCanvas.getContext('2d');
+        const procCanvas = document.createElement('canvas');
+        const procCtx = procCanvas.getContext('2d');
+
+        maskCtx.imageSmoothingEnabled = true;
+        procCtx.imageSmoothingEnabled = true;
+
+        const showMaskPreview = true;
+        maskCanvas.style.display = showMaskPreview ? 'block' : 'none';
+
+        const maskTexture = new THREE.CanvasTexture(maskCanvas);
+        maskTexture.colorSpace = THREE.SRGBColorSpace;
+        maskTexture.minFilter = THREE.LinearFilter;
+        maskTexture.magFilter = THREE.LinearFilter;
+        maskTexture.generateMipmaps = false;
+
+        const videoMaterial = new THREE.SpriteNodeMaterial();
+        videoMaterial.colorNode = texture(maskTexture);
+        videoMaterial.transparent = true;
+
+        const webcamConfig = {
+            showVideo: false,
+            showOutline: false,
+            videoOpacity: 0.9,
+            spriteScale: 3,
+            cropMode: 'left', // 'full', 'left', 'right'
+            cropWidth: 0,
+            cropX: 0,
+            virtualVideo: false
+        };
+
+        let sourceWidth = 0;
+        let sourceHeight = 0;
+        let boxHelper = null;
+        let maskSprite = null;
+        let maskMaterial = null;
+
+        const updateDebugHelpers = () => {
+            // Handle Material Switch
+            if (webcamConfig.showVideo) {
+                maskSprite.material = videoMaterial;
+                maskSprite.material.opacity = webcamConfig.videoOpacity;
+            } else {
+                maskSprite.material = maskMaterial;
+            }
+
+            // Handle Outline
+            if (webcamConfig.showOutline) {
+                if (!boxHelper) {
+                    // Sprite geometry is weird for BoxHelper sometimes.
+                    // Ensure the sprite has scale before creating helper.
+                    if (maskSprite.scale.x === 0) maskSprite.scale.set(1, 1, 1);
+
+                    boxHelper = new THREE.BoxHelper(maskSprite, 0xff0000);
+                    scene.add(boxHelper);
+                }
+                boxHelper.visible = true;
+                boxHelper.update();
+            } else if (boxHelper) {
+                boxHelper.visible = false;
+            }
+        };
+
+        const applyCropConfig = () => {
+            if (!sourceWidth || !sourceHeight) return;
+
+            if (webcamConfig.virtualVideo || webcamConfig.cropMode === 'full') {
+                webcamConfig.cropWidth = sourceWidth;
+                webcamConfig.cropX = 0;
+            } else if (webcamConfig.cropMode === 'left') {
+                webcamConfig.cropWidth = Math.floor(sourceWidth / 2);
+                webcamConfig.cropX = 0;
+            } else if (webcamConfig.cropMode === 'right') {
+                webcamConfig.cropWidth = Math.floor(sourceWidth / 2);
+                webcamConfig.cropX = Math.floor(sourceWidth / 2);
+            }
+
+            // Update Aspect Ratio
+            const aspect = webcamConfig.cropWidth / sourceHeight;
+            // Use spriteScale as the height, so width is height * aspect
+            maskSprite.scale.set(webcamConfig.spriteScale * aspect, webcamConfig.spriteScale, 1);
+
+            procCanvas.width = webcamConfig.cropWidth;
+            procCanvas.height = sourceHeight;
+            maskCanvas.width = webcamConfig.cropWidth;
+            maskCanvas.height = sourceHeight;
+
+            // Force re-initialization of texture on resize
+            if (maskTexture) maskTexture.dispose();
+
+            fillMaskWhite();
+
+            if (webcamActive) {
+                updateWebcamStatus(`Source ${webcamConfig.cropWidth}x${sourceHeight} (${webcamConfig.cropMode})`);
+            }
+
+            updateDebugHelpers();
+        };
+
+        const fillMaskWhite = () => {
+            maskCtx.save();
+            maskCtx.setTransform(1, 0, 0, 1, 0, 0);
+            maskCtx.fillStyle = '#ffffff';
+            maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+            maskCtx.restore();
+            maskTexture.needsUpdate = true;
+        };
+
+        fillMaskWhite();
+
+        let pose = null;
+        let webcamActive = false;
+        let webcamButton = null;
+        let cameraSelect = null;
+        const webcamInfo = { status: 'Idle' };
+        let startBtnCtrl = null;
+        let stopBtnCtrl = null;
+
+        const updateWebcamStatus = (text, isError = false) => {
+            webcamInfo.status = text;
+            if (startBtnCtrl && startBtnCtrl.disable) {
+                if (text.includes('Requesting') || text.includes('Source')) {
+                    startBtnCtrl.disable();
+                    if (stopBtnCtrl && stopBtnCtrl.enable) stopBtnCtrl.enable();
+                } else {
+                    startBtnCtrl.enable();
+                    if (stopBtnCtrl && stopBtnCtrl.disable) stopBtnCtrl.disable();
+                }
+            }
+        };
+
+        const onPoseResults = (results) => {
+
+            if (!results.segmentationMask) return;
+
+            if (maskCanvas.width !== procCanvas.width || maskCanvas.height !== procCanvas.height) {
+                maskCanvas.width = procCanvas.width;
+                maskCanvas.height = procCanvas.height;
+            }
+
+            maskCtx.save();
+            maskCtx.globalCompositeOperation = 'source-over';
+            maskCtx.fillStyle = '#000000';
+            maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+
+            maskCtx.globalCompositeOperation = 'destination-in';
+            maskCtx.drawImage(results.segmentationMask, 0, 0, maskCanvas.width, maskCanvas.height);
+
+            maskCtx.globalCompositeOperation = 'destination-over';
+            maskCtx.fillStyle = '#ffffff';
+            maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+            maskCtx.restore();
+
+            maskTexture.needsUpdate = true;
+
+        };
+
+        const initPose = () => {
+
+            if (pose) return;
+            if (!window.Pose) {
+                updateWebcamStatus('Pose library missing.', true);
+                return;
+            }
+
+            pose = new window.Pose({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+            });
+
+            pose.setOptions({
+                modelComplexity: 1,
+                smoothLandmarks: true,
+                enableSegmentation: true,
+                smoothSegmentation: true,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            pose.onResults(onPoseResults);
+
+        };
+
+        const startWebcam = async () => {
+
+            if (webcamActive) return;
+
+            initPose();
+            if (!pose) return;
+
+            try {
+
+                updateWebcamStatus('Requesting camera...');
+                if (webcamButton) webcamButton.disabled = true;
+
+                const deviceId = cameraSelect ? cameraSelect.value : null;
+                const constraints = {
+                    video: deviceId ? { deviceId: { exact: deviceId } } : true
+                };
+
+                console.log('DEBUG: Requesting user media...', constraints);
+                let stream;
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    console.log('DEBUG: User media granted', stream);
+                } catch (err) {
+                    console.error('DEBUG: getUserMedia failed', err);
+                    updateWebcamStatus(`Camera error: ${err.message}`, true);
+                    if (webcamButton) webcamButton.disabled = false;
+                    return;
+                }
+
+                videoElement.srcObject = stream;
+
+                // Explicitly wait for play and dimensions instead of relying on events
+                try {
+                    await videoElement.play();
+                    console.log('DEBUG: play() resolved');
+                } catch (e) {
+                    console.warn('DEBUG: play() error but continuing:', e);
+                }
+
+                const waitForDimensions = () => new Promise(resolve => {
+                    const check = () => {
+                        if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0 && !videoElement.paused) {
+                            resolve();
+                        } else {
+                            requestAnimationFrame(check);
+                        }
+                    };
+                    check();
+                });
+
+                await waitForDimensions();
+                console.log('DEBUG: Dimensions ready', videoElement.videoWidth, videoElement.videoHeight);
+
+                sourceWidth = videoElement.videoWidth;
+                sourceHeight = videoElement.videoHeight;
+                applyCropConfig();
+
+                if (maskTexture) maskTexture.dispose();
+
+                webcamActive = true;
+
+                // Consolidated render loop
+                let frameCount = 0;
+                const loop = async () => {
+                    if (!webcamActive || videoElement.paused || videoElement.ended) {
+                        if (frameCount % 60 === 0) console.log('Loop paused/ended state:', { webcamActive, paused: videoElement.paused, ended: videoElement.ended });
+                        if (webcamActive && !videoElement.ended) {
+                            requestAnimationFrame(loop);
+                        }
+                        return;
+                    }
+
+                    // 1. Draw video to processing canvas (flipped/scaled/cropped)
+                    procCtx.save();
+                    procCtx.translate(0, procCanvas.height);
+                    procCtx.scale(1, -1);
+                    procCtx.drawImage(
+                        videoElement,
+                        webcamConfig.cropX, 0, webcamConfig.cropWidth, sourceHeight,
+                        0, 0, procCanvas.width, procCanvas.height
+                    );
+                    procCtx.restore();
+
+                    // 2. Handle output or Virtual Mode
+                    if (webcamConfig.virtualVideo) {
+                        // Virtual Video Mode: PURE PASS-THROUGH
+                        // Bypass procCanvas (flip/crop) and draw raw video directly to maskCanvas
+                        if (maskCanvas.width !== videoElement.videoWidth || maskCanvas.height !== videoElement.videoHeight) {
+                            maskCanvas.width = videoElement.videoWidth;
+                            maskCanvas.height = videoElement.videoHeight;
+                        }
+
+                        maskCtx.drawImage(videoElement, 0, 0, maskCanvas.width, maskCanvas.height);
+                        maskTexture.needsUpdate = true;
+
+                        requestAnimationFrame(loop);
+
+                    } else if (webcamConfig.showVideo) {
+                        // Direct pass-through for debug
+                        maskCtx.drawImage(procCanvas, 0, 0);
+                        maskTexture.needsUpdate = true;
+
+                        frameCount++;
+                        if (frameCount % 120 === 0) {
+                            console.log('DEBUG: Updating video texture', {
+                                width: procCanvas.width,
+                                height: procCanvas.height,
+                                videoState: videoElement.readyState
+                            });
+                        }
+
+                        requestAnimationFrame(loop);
+                    } else {
+                        // Send to MediaPipe Pose
+                        try {
+                            await pose.send({ image: procCanvas });
+                            requestAnimationFrame(loop);
+                        } catch (err) {
+                            console.error('Pose send error:', err);
+                            updateWebcamStatus(`Pose error: ${err.message}`, true);
+                            webcamActive = false;
+                            if (startBtnCtrl && startBtnCtrl.enable) startBtnCtrl.enable();
+                        }
+                    }
+                };
+
+                loop();
+
+            } catch (err) {
+
+                updateWebcamStatus(`Camera error: ${err.message}`, true);
+                if (webcamButton) webcamButton.disabled = false;
+
+            }
+
+        };
+
+        let camera, scene, renderer, controls, updateCompute;
+        let attractors = [];
+        let statusState = null;
+        let attractorStatus = [];
+        let cameraState = null;
+        let cameraControls = null;
+        let imuSocket = null;
+        const imuState = {
+            roll: 0,
+            pitch: 0,
+            yaw: 0,
+            lastUpdate: 0,
+            connected: false
+        };
+        const imuDebug = true;
+        let lastImuLog = 0;
+        const defaultImuHost = '10.0.0.151';
+        const imuHost = (window.location.hostname && window.location.hostname !== 'localhost')
+            ? window.location.hostname
+            : defaultImuHost;
+        const imuConfig = {
+            url: `ws://${imuHost}:81`,
+            timeoutMs: 1000,
+            mapping: {
+                order: 'XYZ',
+                roll: { axis: 'x', sign: 1 },
+                pitch: { axis: 'y', sign: 1 },
+                yaw: { axis: 'z', sign: 1 }
+            }
+        };
+        const imuAxisEnabled = {
+            roll: true,
+            pitch: true,
+            yaw: true
+        };
+        const imuEuler = new THREE.Euler();
+        const imuAxis = new THREE.Vector3();
+
+        const roundValue = (value) => Math.round(value * 1000) / 1000;
+        const syncCameraValue = (control, state, key, value) => {
+
+            const rounded = roundValue(value);
+
+            if (state) {
+                state[key] = rounded;
+            }
+
+            if (!control || !control.input || document.activeElement === control.input) {
+                return;
+            }
+
+            const current = parseFloat(control.input.value);
+            if (Number.isNaN(current) || current !== rounded) {
+                control.input.value = rounded;
+            }
+
+        };
+
+        const connectImu = () => {
+            if (imuSocket) {
+                imuSocket.close();
+            }
+
+            imuSocket = new WebSocket(imuConfig.url);
+
+            imuSocket.addEventListener('open', () => {
+                imuState.connected = true;
+                if (imuDebug) console.log('[IMU] connected', imuConfig.url);
+            });
+
+            imuSocket.addEventListener('close', () => {
+                imuState.connected = false;
+                if (imuDebug) console.log('[IMU] disconnected');
+                setTimeout(connectImu, 1000);
+            });
+
+            imuSocket.addEventListener('error', (event) => {
+                if (imuDebug) console.log('[IMU] error', event);
+            });
+
+            imuSocket.addEventListener('message', (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (Number.isFinite(data.roll) && Number.isFinite(data.pitch) && Number.isFinite(data.yaw)) {
+                        imuState.roll = data.roll;
+                        imuState.pitch = data.pitch;
+                        imuState.yaw = data.yaw;
+                        imuState.lastUpdate = performance.now();
+                        if (imuDebug) {
+                            const now = performance.now();
+                            if (now - lastImuLog >= 1000) {
+                                console.log('[IMU] update', imuState);
+                                lastImuLog = now;
+                            }
+                        }
+                    }
+                } catch (err) {
+                    if (imuDebug) console.log('[IMU] parse error', err, event.data);
+                }
+            });
+        };
+
+        const applyImuRotation = (attractor) => {
+            let rx = 0;
+            let ry = 0;
+            let rz = 0;
+
+            const quantizeDeg = (value) => Math.round(value / 5) * 5;
+            const rollDeg = imuAxisEnabled.roll ? quantizeDeg(imuState.roll * imuConfig.mapping.roll.sign) : 0;
+            const pitchDeg = imuAxisEnabled.pitch ? quantizeDeg(imuState.pitch * imuConfig.mapping.pitch.sign) : 0;
+            const yawDeg = imuAxisEnabled.yaw ? quantizeDeg(imuState.yaw * imuConfig.mapping.yaw.sign) : 0;
+
+            const rollRad = THREE.MathUtils.degToRad(rollDeg);
+            const pitchRad = THREE.MathUtils.degToRad(pitchDeg);
+            const yawRad = THREE.MathUtils.degToRad(yawDeg);
+
+            if (imuConfig.mapping.roll.axis === 'x') rx = rollRad;
+            if (imuConfig.mapping.roll.axis === 'y') ry = rollRad;
+            if (imuConfig.mapping.roll.axis === 'z') rz = rollRad;
+
+            if (imuConfig.mapping.pitch.axis === 'x') rx = pitchRad;
+            if (imuConfig.mapping.pitch.axis === 'y') ry = pitchRad;
+            if (imuConfig.mapping.pitch.axis === 'z') rz = pitchRad;
+
+            if (imuConfig.mapping.yaw.axis === 'x') rx = yawRad;
+            if (imuConfig.mapping.yaw.axis === 'y') ry = yawRad;
+            if (imuConfig.mapping.yaw.axis === 'z') rz = yawRad;
+
+            imuEuler.set(rx, ry, rz, imuConfig.mapping.order);
+            attractor.reference.rotation.copy(imuEuler);
+            imuAxis.set(0, 1, 0).applyEuler(imuEuler).normalize();
+            attractor.orientation.copy(imuAxis);
+        };
+
+        const stopWebcam = () => {
+            webcamActive = false;
+            if (videoElement) {
+                videoElement.pause();
+                if (videoElement.srcObject) {
+                    videoElement.srcObject.getTracks().forEach(track => track.stop());
+                    videoElement.srcObject = null;
+                }
+            }
+            updateWebcamStatus('Stopped');
+            if (webcamButton) webcamButton.disabled = false;
+        };
+
+        const setupWebcamControls = async () => {
+
+            let container = document.getElementById('webcam-overlay');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'webcam-overlay';
+                container.style.position = 'absolute';
+                container.style.top = '10px';
+                container.style.left = '10px';
+                container.style.zIndex = '1000';
+                container.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+                container.style.padding = '10px';
+                container.style.borderRadius = '8px';
+                container.style.display = 'flex';
+                container.style.alignItems = 'center';
+                container.style.gap = '10px';
+                document.body.appendChild(container);
+            }
+
+            // Camera Select
+            cameraSelect = document.createElement('select');
+            cameraSelect.style.padding = '5px';
+            cameraSelect.style.borderRadius = '4px';
+            cameraSelect.style.maxWidth = '200px';
+
+            const refreshCameras = async () => {
+                cameraSelect.innerHTML = '';
+                try {
+                    const devices = await navigator.mediaDevices.enumerateDevices();
+                    const videoDevices = devices.filter(device => device.kind === 'videoinput');
+
+                    if (videoDevices.length === 0) {
+                        const option = document.createElement('option');
+                        option.text = 'No cameras found';
+                        cameraSelect.add(option);
+                        return;
+                    }
+
+                    videoDevices.forEach(device => {
+                        const option = document.createElement('option');
+                        option.value = device.deviceId;
+                        option.text = device.label || `Camera ${cameraSelect.length + 1}`;
+                        if (device.label.toLowerCase().includes('virtual')) {
+                            option.selected = true;
+                        }
+                        cameraSelect.add(option);
+                    });
+                } catch (e) {
+                    console.error('Error enumerating devices:', e);
+                    const option = document.createElement('option');
+                    option.text = 'Error enumerating';
+                    cameraSelect.add(option);
+                }
+            };
+
+            // Trigger permission request if labels are empty? 
+            // Often labels are empty until permission is granted. 
+            // We'll try to list, but the user might need to click "Start" once, grant permission, then Refresh.
+            await refreshCameras();
+
+            // Refresh Button
+            const refreshBtn = document.createElement('button');
+            refreshBtn.textContent = '↻';
+            refreshBtn.title = 'Refresh Cameras';
+            refreshBtn.onclick = refreshCameras;
+            refreshBtn.style.padding = '5px 8px';
+            refreshBtn.style.cursor = 'pointer';
+
+            webcamButton = document.createElement('button');
+            webcamButton.id = 'webcam-start-btn';
+            webcamButton.textContent = 'Start Webcam';
+            webcamButton.style.padding = '5px 10px';
+            webcamButton.style.cursor = 'pointer';
+
+            const stopButton = document.createElement('button');
+            stopButton.id = 'webcam-stop-btn';
+            stopButton.textContent = 'Stop Webcam';
+            stopButton.style.padding = '5px 10px';
+            stopButton.style.cursor = 'pointer';
+
+            webcamStatus = document.createElement('span');
+            webcamStatus.textContent = 'Idle';
+            webcamStatus.style.color = '#fff';
+            webcamStatus.style.fontFamily = 'monospace';
+            webcamStatus.dataset.state = 'ok';
+
+            webcamButton.addEventListener('click', startWebcam);
+            stopButton.addEventListener('click', stopWebcam);
+
+            container.innerHTML = '';
+            container.append(cameraSelect, refreshBtn, webcamButton, stopButton, webcamStatus);
+
+        };
+
+        init();
+
+        async function init() {
+
+            camera = new THREE.PerspectiveCamera(25, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(10, 0, 0);
+
+            scene = new THREE.Scene();
+
+            // ambient light
+            const ambientLight = new THREE.AmbientLight('#ffffff', 0.5);
+            scene.add(ambientLight);
+
+            // directional light
+            const directionalLight = new THREE.DirectionalLight('#ffffff', 1.5);
+            directionalLight.position.set(4, 2, 0);
+            scene.add(directionalLight);
+
+            // renderer
+            renderer = new THREE.WebGPURenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setAnimationLoop(animate);
+            renderer.setClearColor('#000000');
+            renderer.inspector = new Inspector();
+            document.body.appendChild(renderer.domElement);
+
+            await renderer.init();
+
+
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.minDistance = 0.1;
+            controls.maxDistance = 50;
+
+            window.addEventListener('resize', onWindowResize);
+            connectImu();
+            setupWebcamControls();
+
+            // -----------------------------------------------------------------
+            // START: Projection Mask Setup
+            // -----------------------------------------------------------------
+
+            maskMaterial = new THREE.SpriteNodeMaterial();
+
+            // Enable depth writing so black pixels block things behind them
+            maskMaterial.depthWrite = true;
+            maskMaterial.depthTest = true;
+
+            // IMPORTANT: Set alphaTest.
+            // Any pixel with alpha < 0.5 is discarded (transparent/pass-through).
+            // Any pixel with alpha >= 0.5 is kept (opaque/blocking).
+            maskMaterial.alphaTest = 0.5;
+
+            maskMaterial.colorNode = Fn(() => {
+                const texColor = texture(maskTexture);
+                const brightness = texColor.r;
+
+                const alpha = float(1.0).toVar();
+
+                If(brightness.greaterThan(0.5), () => {
+                    alpha.assign(0.0);
+                });
+
+                return vec4(0.0, 0.0, 0.0, alpha);
+
+            })();
+
+            maskSprite = new THREE.Sprite(maskMaterial);
+            maskSprite.position.set(0, 0, 0);
+            maskSprite.scale.set(6, 6, 1);
+            scene.add(maskSprite);
+
+            // -----------------------------------------------------------------
+            // END: Projection Mask Setup
+            // -----------------------------------------------------------------
+
+
+            // attractors
+            const attractorsPositions = uniformArray([
+                new THREE.Vector3(- 1, 0, 0),
+                new THREE.Vector3(1, 0, - 0.5),
+                new THREE.Vector3(0, 0.5, 1)
+            ]);
+            const attractorsRotationAxes = uniformArray([
+                new THREE.Vector3(0, 1, 0),
+                new THREE.Vector3(0, 1, 0),
+                new THREE.Vector3(1, 0, - 0.5).normalize()
+            ]);
+            const attractorsLength = uniform(attractorsPositions.array.length, 'uint');
+            attractors = [];
+            const helpersRingGeometry = new THREE.RingGeometry(1, 1.02, 32, 1, 0, Math.PI * 1.5);
+            const helpersArrowGeometry = new THREE.ConeGeometry(0.1, 0.4, 12, 1, false);
+            const helpersMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
+
+            for (let i = 0; i < attractorsPositions.array.length; i++) {
+
+                const attractor = {};
+
+                attractor.position = attractorsPositions.array[i];
+                attractor.orientation = attractorsRotationAxes.array[i];
+                attractor.reference = new THREE.Object3D();
+                attractor.reference.position.copy(attractor.position);
+                attractor.reference.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), attractor.orientation);
+                scene.add(attractor.reference);
+
+                attractor.helper = new THREE.Group();
+                attractor.helper.scale.setScalar(0.325);
+                attractor.reference.add(attractor.helper);
+
+                attractor.ring = new THREE.Mesh(helpersRingGeometry, helpersMaterial);
+                attractor.ring.rotation.x = - Math.PI * 0.5;
+                attractor.helper.add(attractor.ring);
+
+                attractor.arrow = new THREE.Mesh(helpersArrowGeometry, helpersMaterial);
+                attractor.arrow.position.x = 1;
+                attractor.arrow.position.z = 0.2;
+                attractor.arrow.rotation.x = Math.PI * 0.5;
+                attractor.helper.add(attractor.arrow);
+
+                attractor.controls = new TransformControls(camera, renderer.domElement);
+                attractor.controls.mode = 'rotate';
+                attractor.controls.size = 0.5;
+                attractor.controls.attach(attractor.reference);
+                attractor.controls.visible = true;
+                attractor.controls.enabled = attractor.controls.visible;
+                scene.add(attractor.controls.getHelper());
+
+                attractor.controls.addEventListener('dragging-changed', (event) => {
+
+                    controls.enabled = !event.value;
+
+                });
+
+                attractor.controls.addEventListener('change', () => {
+
+                    attractor.position.copy(attractor.reference.position);
+                    attractor.orientation.copy(new THREE.Vector3(0, 1, 0).applyQuaternion(attractor.reference.quaternion));
+
+                });
+
+                attractors.push(attractor);
+
+            }
+
+            // particles
+
+            const count = Math.pow(2, 18);
+            const material = new THREE.SpriteNodeMaterial({ blending: THREE.AdditiveBlending, depthWrite: false });
+
+            const attractorMass = uniform(Number(`1e${7}`));
+            const particleGlobalMass = uniform(Number(`1e${4}`));
+            const timeScale = uniform(1);
+            const spinningStrength = uniform(2.75);
+            const maxSpeed = uniform(8);
+            const gravityConstant = 6.67e-11;
+            const velocityDamping = uniform(0.1);
+            const scale = uniform(0.008);
+            const boundHalfExtent = uniform(8);
+            const colorA = uniform(color('#5900ff'));
+            const colorB = uniform(color('#ffa575'));
+
+            const positionBuffer = instancedArray(count, 'vec3');
+            const velocityBuffer = instancedArray(count, 'vec3');
+
+            const sphericalToVec3 = Fn(([phi, theta]) => {
+
+                const sinPhiRadius = sin(phi);
+
+                return vec3(
+                    sinPhiRadius.mul(sin(theta)),
+                    cos(phi),
+                    sinPhiRadius.mul(cos(theta))
+                );
+
+            });
+
+            // init compute
+
+            const init = Fn(() => {
+
+                const position = positionBuffer.element(instanceIndex);
+                const velocity = velocityBuffer.element(instanceIndex);
+
+                const basePosition = vec3(
+                    hash(instanceIndex.add(uint(Math.random() * 0xffffff))),
+                    hash(instanceIndex.add(uint(Math.random() * 0xffffff))),
+                    hash(instanceIndex.add(uint(Math.random() * 0xffffff)))
+                ).sub(0.5).mul(vec3(5, 0.2, 5));
+                position.assign(basePosition);
+
+                const phi = hash(instanceIndex.add(uint(Math.random() * 0xffffff))).mul(PI).mul(2);
+                const theta = hash(instanceIndex.add(uint(Math.random() * 0xffffff))).mul(PI);
+                const baseVelocity = sphericalToVec3(phi, theta).mul(0.05);
+                velocity.assign(baseVelocity);
+
+            });
+
+            const initCompute = init().compute(count);
+
+            const reset = () => {
+
+                renderer.compute(initCompute);
+
+            };
+
+            reset();
+
+            // update compute
+
+            const particleMassMultiplier = hash(instanceIndex.add(uint(Math.random() * 0xffffff))).remap(0.25, 1).toVar();
+            const particleMass = particleMassMultiplier.mul(particleGlobalMass).toVar();
+
+            const update = Fn(() => {
+
+                const delta = float(1 / 60).mul(timeScale).toVar();
+                const position = positionBuffer.element(instanceIndex);
+                const velocity = velocityBuffer.element(instanceIndex);
+
+                // force
+
+                const force = vec3(0).toVar();
+
+                Loop(attractorsLength, ({ i }) => {
+
+                    const attractorPosition = attractorsPositions.element(i);
+                    const attractorRotationAxis = attractorsRotationAxes.element(i);
+                    const toAttractor = attractorPosition.sub(position);
+                    const distance = toAttractor.length();
+                    const direction = toAttractor.normalize();
+
+                    // gravity
+                    const gravityStrength = attractorMass.mul(particleMass).mul(gravityConstant).div(distance.pow(2)).toVar();
+                    const gravityForce = direction.mul(gravityStrength);
+                    force.addAssign(gravityForce);
+
+                    // spinning
+                    const spinningForce = attractorRotationAxis.mul(gravityStrength).mul(spinningStrength);
+                    const spinningVelocity = spinningForce.cross(toAttractor);
+                    force.addAssign(spinningVelocity);
+
+                });
+
+                // velocity
+
+                velocity.addAssign(force.mul(delta));
+                const speed = velocity.length();
+                If(speed.greaterThan(maxSpeed), () => {
+
+                    velocity.assign(velocity.normalize().mul(maxSpeed));
+
+                });
+                velocity.mulAssign(velocityDamping.oneMinus());
+
+                // position
+
+                position.addAssign(velocity.mul(delta));
+
+                // box loop
+
+                const halfHalfExtent = boundHalfExtent.div(2).toVar();
+                position.assign(mod(position.add(halfHalfExtent), boundHalfExtent).sub(halfHalfExtent));
+
+            });
+            updateCompute = update().compute(count).setName('Update Particles');
+
+            // nodes
+
+            material.positionNode = positionBuffer.toAttribute();
+
+            material.colorNode = Fn(() => {
+
+                const velocity = velocityBuffer.toAttribute();
+                const speed = velocity.length();
+                const colorMix = speed.div(maxSpeed).smoothstep(0, 0.5);
+                const finalColor = mix(colorA, colorB, colorMix);
+                const centeredUv = uv().mul(2).sub(1);
+                const chevronOffset = float(0.4);
+                const chevronThickness = float(0.08);
+                const chevronFeather = float(0.02);
+                const chevronDistance = centeredUv.y.add(centeredUv.x.abs()).sub(chevronOffset).abs();
+                const chevronMask = chevronDistance
+                    .smoothstep(chevronThickness, chevronThickness.add(chevronFeather))
+                    .oneMinus();
+                const maskedColor = finalColor.mul(chevronMask);
+
+                return vec4(maskedColor, chevronMask);
+
+            })();
+
+            material.scaleNode = particleMassMultiplier.mul(scale);
+            material.rotationNode = Fn(() => {
+
+                const velocity = velocityBuffer.toAttribute();
+                const velocityView = velocity.transformDirection(cameraViewMatrix);
+                const velocity2d = velocityView.xy;
+                const rotation = float(0).toVar();
+                const speed = velocity2d.length();
+
+                If(speed.greaterThan(0.0001), () => {
+                    rotation.assign(atan2(velocity2d.x, velocity2d.y));
+                });
+
+                return rotation;
+
+            })();
+
+            // mesh
+
+            const geometry = new THREE.PlaneGeometry(1, 1);
+            const mesh = new THREE.InstancedMesh(geometry, material, count);
+            scene.add(mesh);
+
+            // debug
+
+            const gui = renderer.inspector.createParameters('Parameters');
+
+            gui.add({ attractorMassExponent: attractorMass.value.toString().length - 1 }, 'attractorMassExponent', 1, 10, 1).onChange(value => attractorMass.value = Number(`1e${value}`));
+            gui.add({ particleGlobalMassExponent: particleGlobalMass.value.toString().length - 1 }, 'particleGlobalMassExponent', 1, 10, 1).onChange(value => particleGlobalMass.value = Number(`1e${value}`));
+            gui.add(maxSpeed, 'value', 0, 10, 0.01).name('maxSpeed');
+            gui.add(velocityDamping, 'value', 0, 0.1, 0.001).name('velocityDamping');
+            gui.add(spinningStrength, 'value', 0, 10, 0.01).name('spinningStrength');
+            gui.add(scale, 'value', 0, 0.1, 0.001).name('scale');
+            gui.add(boundHalfExtent, 'value', 0, 20, 0.01).name('boundHalfExtent');
+            gui.addColor({ color: colorA.value.getHexString(THREE.SRGBColorSpace) }, 'color').name('colorA').onChange(value => colorA.value.set(value));
+            gui.addColor({ color: colorB.value.getHexString(THREE.SRGBColorSpace) }, 'color').name('colorB').onChange(value => colorB.value.set(value));
+            gui.add({ controlsMode: attractors[0].controls.mode }, 'controlsMode', ['translate', 'rotate', 'none']).onChange(value => {
+
+                for (const attractor of attractors) {
+
+                    if (value === 'none') {
+
+                        attractor.controls.visible = false;
+                        attractor.controls.enabled = false;
+
+                    } else {
+
+                        attractor.controls.visible = true;
+                        attractor.controls.enabled = true;
+                        attractor.controls.mode = value;
+
+                    }
+
+                }
+
+            });
+
+            gui.add({ helperVisible: attractors[0].helper.visible }, 'helperVisible').onChange(value => {
+
+                for (const attractor of attractors) {
+
+                    attractor.helper.visible = value;
+
+                }
+
+            });
+
+            gui.add({ reset }, 'reset');
+
+            const webcamGroup = renderer.inspector.parameters.createGroup('Webcam Settings');
+
+            webcamGroup.add(webcamConfig, 'showVideo').name('Show Video').listen().onChange(updateDebugHelpers);
+            webcamGroup.add(webcamConfig, 'showOutline').name('Show Outline').listen().onChange(updateDebugHelpers);
+            webcamGroup.add(webcamConfig, 'videoOpacity', 0, 1).name('Video Opacity').listen().onChange(val => {
+                if (webcamConfig.showVideo) maskSprite.material.opacity = val;
+            });
+            webcamGroup.add(webcamConfig, 'spriteScale', 1, 20).name('Scale').listen().onChange(applyCropConfig);
+
+            webcamGroup.add(webcamConfig, 'virtualVideo').name('Virtual Video (Pre-processed)').listen().onChange(applyCropConfig);
+
+            webcamGroup.add(webcamConfig, 'cropMode', ['full', 'left', 'right'])
+                .name('Crop Mode')
+                .listen()
+                .onChange(() => {
+                    applyCropConfig();
+                });
+
+            // webcamGroup.add(webcamInfo, 'status').name('Status').listen();
+            startBtnCtrl = webcamGroup.add({ start: startWebcam }, 'start').name('Start Webcam');
+            stopBtnCtrl = webcamGroup.add({ stop: stopWebcam }, 'stop').name('Stop Webcam');
+            // stopBtnCtrl.disable(); // .disable() might not be supported
+
+            // Force initial state update
+            applyCropConfig();
+            updateDebugHelpers();
+
+            const statusGroup = renderer.inspector.parameters.createGroup('Attractor Status');
+            statusState = { controlsMode: attractors[0].controls.mode };
+            const statusModeControl = statusGroup.add(statusState, 'controlsMode', ['translate', 'rotate', 'none']).name('controlsMode');
+            statusModeControl.listen();
+            statusModeControl.select.disabled = true;
+
+            attractorStatus = [];
+
+            for (let i = 0; i < attractors.length; i++) {
+
+                const data = {
+                    posX: 0,
+                    posY: 0,
+                    posZ: 0,
+                    rotX: 0,
+                    rotY: 0,
+                    rotZ: 0
+                };
+
+                const folder = statusGroup.addFolder(`Attractor ${i + 1}`);
+                const posXControl = folder.add(data, 'posX').name('Pos X');
+                const posYControl = folder.add(data, 'posY').name('Pos Y');
+                const posZControl = folder.add(data, 'posZ').name('Pos Z');
+                const rotXControl = folder.add(data, 'rotX').name('Rot X (deg)');
+                const rotYControl = folder.add(data, 'rotY').name('Rot Y (deg)');
+                const rotZControl = folder.add(data, 'rotZ').name('Rot Z (deg)');
+
+                [posXControl, posYControl, posZControl, rotXControl, rotYControl, rotZControl].forEach((control) => {
+                    control.listen();
+                    control.input.readOnly = true;
+                    control.input.tabIndex = -1;
+                });
+
+                attractorStatus.push(data);
+
+            }
+
+            const cameraGroup = renderer.inspector.parameters.createGroup('Camera');
+
+            const imuGroup = renderer.inspector.parameters.createGroup('IMU Mapping');
+            const imuRollControl = imuGroup.add(imuAxisEnabled, 'roll').name('Apply Roll (X)');
+            const imuPitchControl = imuGroup.add(imuAxisEnabled, 'pitch').name('Apply Pitch (Y)');
+            const imuYawControl = imuGroup.add(imuAxisEnabled, 'yaw').name('Apply Yaw (Z)');
+            [imuRollControl, imuPitchControl, imuYawControl].forEach((control) => {
+                control.listen();
+            });
+
+            const updateControlsTargetFromCamera = () => {
+
+                if (!controls) return;
+
+                const distance = camera.position.distanceTo(controls.target);
+                const direction = new THREE.Vector3(0, 0, - 1).applyEuler(camera.rotation);
+                controls.target.copy(camera.position).add(direction.multiplyScalar(distance));
+                controls.update();
+
+            };
+
+            cameraState = {
+                posX: roundValue(camera.position.x),
+                posY: roundValue(camera.position.y),
+                posZ: roundValue(camera.position.z),
+                rotX: roundValue(THREE.MathUtils.radToDeg(camera.rotation.x)),
+                rotY: roundValue(THREE.MathUtils.radToDeg(camera.rotation.y)),
+                rotZ: roundValue(THREE.MathUtils.radToDeg(camera.rotation.z)),
+                fov: roundValue(camera.fov)
+            };
+
+            cameraControls = {
+                posX: cameraGroup.add(cameraState, 'posX').name('Pos X'),
+                posY: cameraGroup.add(cameraState, 'posY').name('Pos Y'),
+                posZ: cameraGroup.add(cameraState, 'posZ').name('Pos Z'),
+                rotX: cameraGroup.add(cameraState, 'rotX').name('Rot X (deg)'),
+                rotY: cameraGroup.add(cameraState, 'rotY').name('Rot Y (deg)'),
+                rotZ: cameraGroup.add(cameraState, 'rotZ').name('Rot Z (deg)'),
+                fov: cameraGroup.add(cameraState, 'fov', 1, 120).name('FOV')
+            };
+
+            cameraControls.posX.onChange((value) => {
+                camera.position.x = value;
+            });
+            cameraControls.posY.onChange((value) => {
+                camera.position.y = value;
+            });
+            cameraControls.posZ.onChange((value) => {
+                camera.position.z = value;
+            });
+            cameraControls.rotX.onChange((value) => {
+                camera.rotation.x = THREE.MathUtils.degToRad(value);
+                updateControlsTargetFromCamera();
+            });
+            cameraControls.rotY.onChange((value) => {
+                camera.rotation.y = THREE.MathUtils.degToRad(value);
+                updateControlsTargetFromCamera();
+            });
+            cameraControls.rotZ.onChange((value) => {
+                camera.rotation.z = THREE.MathUtils.degToRad(value);
+                updateControlsTargetFromCamera();
+            });
+            cameraControls.fov.onChange((value) => {
+                camera.fov = value;
+                camera.updateProjectionMatrix();
+            });
+
+        }
+
+        function onWindowResize() {
+
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+
+            renderer.setSize(window.innerWidth, window.innerHeight);
+
+        }
+
+        async function animate() {
+
+            controls.update();
+
+            const imuActive = imuState.connected && (performance.now() - imuState.lastUpdate <= imuConfig.timeoutMs);
+            if (imuActive && attractors.length > 2) {
+                applyImuRotation(attractors[2]);
+            } else if (imuDebug && imuState.connected) {
+                const now = performance.now();
+                if (now - lastImuLog >= 1000) {
+                    console.log('[IMU] stale data', {
+                        ageMs: now - imuState.lastUpdate,
+                        timeoutMs: imuConfig.timeoutMs
+                    });
+                    lastImuLog = now;
+                }
+            }
+
+            if (statusState) {
+
+                statusState.controlsMode = attractors[0].controls.mode;
+
+                for (let i = 0; i < attractors.length; i++) {
+
+                    const reference = attractors[i].reference;
+                    const data = attractorStatus[i];
+
+                    data.posX = roundValue(reference.position.x);
+                    data.posY = roundValue(reference.position.y);
+                    data.posZ = roundValue(reference.position.z);
+                    data.rotX = roundValue(THREE.MathUtils.radToDeg(reference.rotation.x));
+                    data.rotY = roundValue(THREE.MathUtils.radToDeg(reference.rotation.y));
+                    data.rotZ = roundValue(THREE.MathUtils.radToDeg(reference.rotation.z));
+
+                }
+
+            }
+
+            if (cameraControls && cameraState) {
+
+                syncCameraValue(cameraControls.posX, cameraState, 'posX', camera.position.x);
+                syncCameraValue(cameraControls.posY, cameraState, 'posY', camera.position.y);
+                syncCameraValue(cameraControls.posZ, cameraState, 'posZ', camera.position.z);
+                syncCameraValue(cameraControls.rotX, cameraState, 'rotX', THREE.MathUtils.radToDeg(camera.rotation.x));
+                syncCameraValue(cameraControls.rotY, cameraState, 'rotY', THREE.MathUtils.radToDeg(camera.rotation.y));
+                syncCameraValue(cameraControls.rotZ, cameraState, 'rotZ', THREE.MathUtils.radToDeg(camera.rotation.z));
+                syncCameraValue(cameraControls.fov, cameraState, 'fov', camera.fov);
+
+            }
+
+            renderer.compute(updateCompute);
+            renderer.render(scene, camera);
+
+        }
+
+    </script>
+</body>
+
+</html>
