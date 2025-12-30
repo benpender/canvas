@@ -57,7 +57,7 @@
     <script type="module">
 
         import * as THREE from 'three/webgpu';
-        import { atan2, cameraViewMatrix, float, If, PI, color, cos, instanceIndex, Loop, mix, mod, sin, instancedArray, Fn, uint, uniform, uniformArray, hash, uv, vec3, vec4, texture } from 'three/tsl';
+        import { atan2, cameraViewMatrix, float, If, PI, color, cos, instanceIndex, Loop, mix, mod, sin, instancedArray, Fn, uint, uniform, uniformArray, hash, uv, vec2, vec3, vec4, texture } from 'three/tsl';
 
         import { Inspector } from 'three/addons/inspector/Inspector.js';
 
@@ -86,6 +86,28 @@
         videoMaterial.colorNode = texture(maskTexture);
         videoMaterial.transparent = true;
 
+        const directVideoTexture = new THREE.VideoTexture(videoElement);
+        directVideoTexture.colorSpace = THREE.SRGBColorSpace;
+        directVideoTexture.minFilter = THREE.LinearFilter;
+        directVideoTexture.magFilter = THREE.LinearFilter;
+        directVideoTexture.generateMipmaps = false;
+
+        const directVideoMaterial = new THREE.SpriteNodeMaterial();
+        // Flip UVs horizontally for the direct video feed
+        const flippedUV = vec2(uv().x.oneMinus(), uv().y);
+        directVideoMaterial.colorNode = texture(directVideoTexture, flippedUV);
+        directVideoMaterial.transparent = true;
+
+        const socketTexture = new THREE.Texture();
+        socketTexture.colorSpace = THREE.SRGBColorSpace;
+        socketTexture.minFilter = THREE.LinearFilter;
+        socketTexture.magFilter = THREE.LinearFilter;
+        socketTexture.generateMipmaps = false;
+
+        const socketMaterial = new THREE.SpriteNodeMaterial();
+        socketMaterial.colorNode = texture(socketTexture, flippedUV); // Reuse flippedUV
+        socketMaterial.transparent = true;
+
         const webcamConfig = {
             showVideo: false,
             showOutline: false,
@@ -104,15 +126,26 @@
         let boxHelper = null;
         let maskSprite = null;
         let maskMaterial = null;
+        let socketMaskMaterial = null;
 
         const updateDebugHelpers = () => {
             // Handle Material Switch & Visibility
             if (webcamConfig.showVideo) {
-                maskSprite.material = videoMaterial;
+                if (webcamConfig.virtualVideo) {
+                    maskSprite.material = directVideoMaterial;
+                } else if (webcamConfig.virtualSocket) {
+                    maskSprite.material = socketMaterial;
+                } else {
+                    maskSprite.material = videoMaterial;
+                }
                 maskSprite.material.opacity = webcamConfig.videoOpacity;
                 maskSprite.visible = true; // Always show if video is enabled
             } else {
-                maskSprite.material = maskMaterial;
+                if (webcamConfig.virtualSocket) {
+                    maskSprite.material = socketMaskMaterial;
+                } else {
+                    maskSprite.material = maskMaterial;
+                }
                 // If masking is disabled, hide the sprite so particles aren't occluded
                 maskSprite.visible = webcamConfig.enableMasking;
             }
@@ -303,22 +336,25 @@
                             maskTexture.colorSpace = THREE.SRGBColorSpace;
                             maskTexture.minFilter = THREE.LinearFilter;
                             maskTexture.magFilter = THREE.LinearFilter;
-                            if (maskSprite) maskSprite.material.colorNode = texture(maskTexture);
+                            // maskSprite material logic handled in updateDebugHelpers
                         }
 
                         updateWebcamStatus(`WebSocket Stream ${sourceWidth}x${sourceHeight}`);
+                        updateDebugHelpers();
                     }
 
-                    // Direct draw + Horizontal Flip (Mirroring)
-                    maskCtx.save();
-                    maskCtx.translate(maskCanvas.width, 0);
-                    maskCtx.scale(-1, 1);
-                    maskCtx.drawImage(bitmap, 0, 0, maskCanvas.width, maskCanvas.height);
-                    maskCtx.restore();
+                    // Zero-Copy Path: Assign Bitmap directly to Texture
+                    // Close previous bitmap to prevent leaks
+                    if (socketTexture.image && socketTexture.image.close) {
+                        socketTexture.image.close();
+                    }
 
-                    if (maskTexture) maskTexture.needsUpdate = true;
+                    socketTexture.image = bitmap;
+                    socketTexture.needsUpdate = true;
 
-                    bitmap.close();
+                    // Direct Draw Logic Removed (Zero-Copy)
+
+                    // bitmap.close(); // Do NOT close here, Texture needs it.
                 } catch (e) {
                     console.error('Frame decode error:', e);
                 }
@@ -415,28 +451,23 @@
                     }
 
                     // 1. Draw video to processing canvas (flipped/scaled/cropped)
-                    procCtx.save();
-                    procCtx.translate(0, procCanvas.height);
-                    procCtx.scale(1, -1);
-                    procCtx.drawImage(
-                        videoElement,
-                        webcamConfig.cropX, 0, webcamConfig.cropWidth, sourceHeight,
-                        0, 0, procCanvas.width, procCanvas.height
-                    );
-                    procCtx.restore();
+                    // ONLY if not in Virtual Video mode
+                    if (!webcamConfig.virtualVideo) {
+                        procCtx.save();
+                        procCtx.translate(0, procCanvas.height);
+                        procCtx.scale(1, -1);
+                        procCtx.drawImage(
+                            videoElement,
+                            webcamConfig.cropX, 0, webcamConfig.cropWidth, sourceHeight,
+                            0, 0, procCanvas.width, procCanvas.height
+                        );
+                        procCtx.restore();
+                    }
 
                     // 2. Handle output or Virtual Mode
                     if (webcamConfig.virtualVideo) {
-                        // Virtual Video Mode: PURE PASS-THROUGH
-                        // Bypass procCanvas (flip/crop) and draw raw video directly to maskCanvas
-                        if (maskCanvas.width !== videoElement.videoWidth || maskCanvas.height !== videoElement.videoHeight) {
-                            maskCanvas.width = videoElement.videoWidth;
-                            maskCanvas.height = videoElement.videoHeight;
-                        }
-
-                        maskCtx.drawImage(videoElement, 0, 0, maskCanvas.width, maskCanvas.height);
-                        maskTexture.needsUpdate = true;
-
+                        // Virtual Video Mode: PURE PASS-THROUGH VIA VIDEO TEXTURE
+                        // No CPU canvas copies needed. Texture updates automatically.
                         requestAnimationFrame(loop);
 
                     } else if (webcamConfig.showVideo) {
@@ -695,6 +726,18 @@
 
                 return vec4(0.0, 0.0, 0.0, alpha);
 
+            })();
+
+            socketMaskMaterial = new THREE.SpriteNodeMaterial();
+            socketMaskMaterial.depthWrite = true;
+            socketMaskMaterial.depthTest = true;
+            socketMaskMaterial.alphaTest = 0.5;
+            socketMaskMaterial.colorNode = Fn(() => {
+                const texColor = texture(socketTexture, flippedUV);
+                const brightness = texColor.r;
+                const alpha = float(1.0).toVar();
+                If(brightness.greaterThan(0.5), () => { alpha.assign(0.0); });
+                return vec4(0.0, 0.0, 0.0, alpha);
             })();
 
             maskSprite = new THREE.Sprite(maskMaterial);
