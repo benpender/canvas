@@ -94,7 +94,8 @@
             cropMode: 'left', // 'full', 'left', 'right'
             cropWidth: 0,
             cropX: 0,
-            virtualVideo: false
+            virtualVideo: false,
+            enableMasking: true
         };
 
         let sourceWidth = 0;
@@ -104,12 +105,15 @@
         let maskMaterial = null;
 
         const updateDebugHelpers = () => {
-            // Handle Material Switch
+            // Handle Material Switch & Visibility
             if (webcamConfig.showVideo) {
                 maskSprite.material = videoMaterial;
                 maskSprite.material.opacity = webcamConfig.videoOpacity;
+                maskSprite.visible = true; // Always show if video is enabled
             } else {
                 maskSprite.material = maskMaterial;
+                // If masking is disabled, hide the sprite so particles aren't occluded
+                maskSprite.visible = webcamConfig.enableMasking;
             }
 
             // Handle Outline
@@ -941,6 +945,7 @@
 
             const webcamGroup = renderer.inspector.parameters.createGroup('Webcam Settings');
 
+            webcamGroup.add(webcamConfig, 'enableMasking').name('Enable Masking').listen().onChange(updateDebugHelpers);
             webcamGroup.add(webcamConfig, 'showVideo').name('Show Video').listen().onChange(updateDebugHelpers);
             webcamGroup.add(webcamConfig, 'showOutline').name('Show Outline').listen().onChange(updateDebugHelpers);
             webcamGroup.add(webcamConfig, 'videoOpacity', 0, 1).name('Video Opacity').listen().onChange(val => {

@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Loop Latency Tester</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: black;
+            font-family: monospace;
+        }
+
+        #flash-area {
+            width: 100vw;
+            height: 100vh;
+            background-color: black;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            width: 300px;
+        }
+
+        select,
+        button,
+        input {
+            width: 100%;
+            margin-bottom: 10px;
+            padding: 5px;
+            background: #333;
+            color: white;
+            border: 1px solid #555;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+        }
+
+        #video-preview {
+            margin-top: 10px;
+            width: 100%;
+            transform: scaleX(-1);
+            border: 1px solid #555;
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="flash-area"></div>
+
+    <div id="controls">
+        <h3>Latency Tester</h3>
+        <select id="camera-select">
+            <option>Loading cameras...</option>
+        </select>
+        <button id="start-cam-btn">Start Camera</button>
+        <hr>
+        <div>
+            <label>Threshold (0-255): <span id="thresh-val">100</span></label>
+            <input type="range" id="threshold" min="0" max="255" value="100">
+        </div>
+        <div>
+            <label>Brightness: <span id="bright-val">0</span></label>
+            <progress id="bright-bar" value="0" max="255" style="width:100%"></progress>
+        </div>
+        <hr>
+        <button id="toggle-test-btn" disabled>Start Test Loop</button>
+        <div class="stat-row"><span>Last:</span> <span id="last-lat">--</span> ms</div>
+        <div class="stat-row"><span>Avg (N=10):</span> <span id="avg-lat">--</span> ms</div>
+        <div class="stat-row"><span>Min:</span> <span id="min-lat">--</span> ms</div>
+        <div class="stat-row"><span>Max:</span> <span id="max-lat">--</span> ms</div>
+
+        <video id="video-preview" autoplay playsinline muted></video>
+    </div>
+
+    <!-- Hidden Canvas for Pixel Analysis -->
+    <canvas id="proc-canvas" class="hidden"></canvas>
+
+    <script>
+        const flashArea = document.getElementById('flash-area');
+        const cameraSelect = document.getElementById('camera-select');
+        const videoResult = document.getElementById('video-preview');
+        const canvas = document.getElementById('proc-canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+        // Stats
+        let latencies = [];
+        const maxHistory = 10;
+
+        // State
+        let isTesting = false;
+        let flashState = 'BLACK'; // 'BLACK' or 'WHITE'
+        let flashStartTime = 0;
+        let waitingForReturn = false;
+        let threshold = 100;
+        let intervalId = null;
+
+        // 1. Enumerate Cameras
+        async function getCameras() {
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
+                cameraSelect.innerHTML = '';
+                videoDevices.forEach(device => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.text = device.label || `Camera ${cameraSelect.length + 1}`;
+                    cameraSelect.appendChild(option);
+                });
+            } catch (e) {
+                console.error(e);
+                cameraSelect.innerHTML = '<option>Error loading cameras</option>';
+            }
+        }
+        // Initial call
+        navigator.mediaDevices.getUserMedia({ video: true }).then(s => {
+            s.getTracks().forEach(t => t.stop());
+            getCameras();
+        });
+
+        // 2. Start Camera
+        document.getElementById('start-cam-btn').onclick = async () => {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { deviceId: cameraSelect.value ? { exact: cameraSelect.value } : undefined }
+            });
+            videoResult.srcObject = stream;
+            document.getElementById('toggle-test-btn').disabled = false;
+        };
+
+        // 3. UI Helpers
+        document.getElementById('threshold').oninput = (e) => {
+            threshold = parseInt(e.target.value);
+            document.getElementById('thresh-val').textContent = threshold;
+        };
+
+        // 4. Test Logic
+        document.getElementById('toggle-test-btn').onclick = (e) => {
+            if (isTesting) {
+                stopTest();
+                e.target.textContent = "Start Test Loop";
+            } else {
+                startTest();
+                e.target.textContent = "Stop Test Loop";
+            }
+        };
+
+        function startTest() {
+            isTesting = true;
+            flashState = 'BLACK';
+            flashArea.style.backgroundColor = 'black';
+
+            // Loop Flash
+            triggerFlash();
+
+            // Start Analysis Loop
+            requestAnimationFrame(analyzeFrame);
+        }
+
+        function stopTest() {
+            isTesting = false;
+            flashArea.style.backgroundColor = 'black';
+            clearTimeout(intervalId);
+        }
+
+        function triggerFlash() {
+            if (!isTesting) return;
+
+            // Randomize start time slightly to avoid sync with framerate
+            setTimeout(() => {
+                flashState = 'WHITE';
+                flashArea.style.backgroundColor = 'white';
+                flashStartTime = performance.now();
+                waitingForReturn = true;
+
+                // Turn off after 200ms
+                setTimeout(() => {
+                    flashState = 'BLACK';
+                    flashArea.style.backgroundColor = 'black';
+                }, 200);
+
+                // Schedule next flash (e.g. every 2s)
+                intervalId = setTimeout(triggerFlash, 2000);
+
+            }, Math.random() * 500 + 500); // Wait 0.5-1s before firing
+        }
+
+        function analyzeFrame() {
+            if (!isTesting) return;
+
+            if (videoResult.readyState === videoResult.HAVE_ENOUGH_DATA) {
+                const w = videoResult.videoWidth;
+                const h = videoResult.videoHeight;
+                canvas.width = 64; // Low res for speed
+                canvas.height = 64;
+
+                // Draw center crop
+                ctx.drawImage(videoResult, 0, 0, w, h, 0, 0, 64, 64);
+
+                // Get pixel data
+                const frame = ctx.getImageData(0, 0, 64, 64);
+                const data = frame.data;
+                let totalBright = 0;
+
+                // Simple avg brightness
+                for (let i = 0; i < data.length; i += 4) {
+                    totalBright += (data[i] + data[i + 1] + data[i + 2]) / 3;
+                }
+                const avgBright = totalBright / (data.length / 4);
+
+                // Update UI
+                document.getElementById('bright-val').textContent = Math.floor(avgBright);
+                document.getElementById('bright-bar').value = avgBright;
+
+                // Detection Logic
+                if (waitingForReturn && avgBright > threshold) {
+                    const now = performance.now();
+                    const diff = now - flashStartTime;
+
+                    // Add to stats
+                    latencies.push(diff);
+                    if (latencies.length > maxHistory) latencies.shift();
+
+                    updateStats(diff);
+                    waitingForReturn = false; // Debounce so we don't trigger multiple times per flash
+                }
+            }
+
+            requestAnimationFrame(analyzeFrame);
+        }
+
+        function updateStats(last) {
+            const sum = latencies.reduce((a, b) => a + b, 0);
+            const avg = sum / latencies.length;
+            const min = Math.min(...latencies);
+            const max = Math.max(...latencies);
+
+            document.getElementById('last-lat').textContent = last.toFixed(1);
+            document.getElementById('avg-lat').textContent = avg.toFixed(1);
+            document.getElementById('min-lat').textContent = min.toFixed(1);
+            document.getElementById('max-lat').textContent = max.toFixed(1);
+        }
+
+    </script>
+</body>
+
+</html>
