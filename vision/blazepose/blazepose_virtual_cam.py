@@ -1,25 +1,25 @@
 """
-BlazePose full-body segmentation preprocessor
---------------------------------------------
+BlazePose full-body segmentation → Virtual Webcam (OBS)
+
+macOS-correct version.
 
 This script:
 • Handles stereo side-by-side cameras
 • Fixes upside-down cameras
 • Runs BlazePose segmentation locally (Python)
 • Applies configurable mask smoothing
-• Shows a live preview window for tuning
+• Outputs a silhouette mask as OBS Virtual Camera
 
-Later, this same file can be converted to a virtual webcam
-by replacing the preview section (marked clearly below).
-
---------------------------------------------
-EDIT ONLY THE CONFIG SECTION BELOW
---------------------------------------------
+IMPORTANT:
+• OBS must be running
+• OBS Virtual Camera must be started
+• OBS scene should be EMPTY
 """
 
 import cv2
 import numpy as np
 import time
+import pyvirtualcam
 
 from mediapipe import Image, ImageFormat
 from mediapipe.tasks.python import BaseOptions
@@ -33,46 +33,32 @@ from mediapipe.tasks.python.vision import (
 # ======================= CONFIG =============================
 # ============================================================
 
-# -------- Camera selection --------
 CAMERA_INDEX = 0
 
-# -------- Stereo camera options --------
-# Set to True if your camera outputs LEFT | RIGHT side-by-side
+# Stereo camera support
 STEREO_MODE = True
+STEREO_VIEW = "left"   # "left", "right", or "full"
 
-# Which half to use:
-#   "left"  = left half
-#   "right" = right half
-#   "full"  = no cropping
-STEREO_VIEW = "left"
+# Orientation fixes
+FLIP_VERTICAL = True
+FLIP_HORIZONTAL = False
 
-# -------- Orientation fixes --------
-# Most stereo rigs are mounted upside down
-FLIP_VERTICAL = True      # fixes upside-down image
-FLIP_HORIZONTAL = False   # mirror image if desired
-
-# -------- BlazePose model --------
+# BlazePose model
 MODEL_PATH = "pose_landmarker_full.task"
 
-# -------- Segmentation tuning --------
-# Lower = thicker / more forgiving
-# Higher = thinner / cleaner
+# Segmentation tuning
 SEGMENTATION_THRESHOLD = 0.6
 
-# -------- Mask shaping (VERY IMPORTANT) --------
-# These fix the "chunky" silhouette feeling
-
+# Mask shaping
 ENABLE_DILATION = True
-DILATION_KERNEL_SIZE = 5      # 3 = subtle, 5 = good default, 7 = chunky
-DILATION_ITERATIONS = 1       # usually 1
+DILATION_KERNEL_SIZE = 5
+DILATION_ITERATIONS = 1
 
 ENABLE_BLUR = True
-BLUR_KERNEL_SIZE = 11          # must be odd: 5, 7, 9
-                              # 5 = sharp, 7 = smooth, 11 = dreamy
+BLUR_KERNEL_SIZE = 11   # must be odd
 
-# -------- Preview window --------
-SHOW_PREVIEW = True           # turn off later for virtual cam
-PREVIEW_SCALE = 1.0           # 0.5 for smaller window
+# Virtual camera
+VIRTUAL_CAM_FPS = 30
 
 # ============================================================
 # ================== END CONFIG ==============================
@@ -92,12 +78,48 @@ options = PoseLandmarkerOptions(
 pose = PoseLandmarker.create_from_options(options)
 
 # ------------------------------------------------------------
-# Open webcam
+# Open physical webcam
 # ------------------------------------------------------------
 
 cap = cv2.VideoCapture(CAMERA_INDEX)
 if not cap.isOpened():
     raise RuntimeError("Could not open webcam")
+
+# Read first frame to determine output size
+ret, frame = cap.read()
+if not ret:
+    raise RuntimeError("Could not read initial frame")
+
+# Apply stereo crop once for sizing
+if STEREO_MODE and STEREO_VIEW != "full":
+    half_w = frame.shape[1] // 2
+    if STEREO_VIEW == "left":
+        frame = frame[:, :half_w]
+    elif STEREO_VIEW == "right":
+        frame = frame[:, half_w:]
+
+# Orientation fixes
+if FLIP_VERTICAL:
+    frame = cv2.flip(frame, 0)
+if FLIP_HORIZONTAL:
+    frame = cv2.flip(frame, 1)
+
+h, w, _ = frame.shape
+
+# ------------------------------------------------------------
+# Open virtual camera (macOS-correct: BGR)
+# ------------------------------------------------------------
+
+virtual_cam = pyvirtualcam.Camera(
+    width=w,
+    height=h,
+    fps=VIRTUAL_CAM_FPS,
+    fmt=pyvirtualcam.PixelFormat.BGR,
+    print_fps=True,
+)
+
+print("[INFO] Virtual camera started:", virtual_cam.device)
+print(f"[INFO] Output resolution: {w} x {h}")
 
 start_time = time.time()
 
@@ -110,33 +132,21 @@ while True:
     if not ret:
         break
 
-    # --------------------------------------------------------
-    # Stereo cropping
-    # --------------------------------------------------------
-
-    h, w, _ = frame.shape
-
+    # Stereo crop
     if STEREO_MODE and STEREO_VIEW != "full":
-        half_w = w // 2
+        half_w = frame.shape[1] // 2
         if STEREO_VIEW == "left":
             frame = frame[:, :half_w]
         elif STEREO_VIEW == "right":
             frame = frame[:, half_w:]
 
-    # --------------------------------------------------------
     # Orientation fixes
-    # --------------------------------------------------------
-
     if FLIP_VERTICAL:
         frame = cv2.flip(frame, 0)
-
     if FLIP_HORIZONTAL:
         frame = cv2.flip(frame, 1)
 
-    # --------------------------------------------------------
     # BlazePose inference
-    # --------------------------------------------------------
-
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     mp_image = Image(
@@ -147,18 +157,12 @@ while True:
     timestamp_ms = int((time.time() - start_time) * 1000)
     result = pose.detect_for_video(mp_image, timestamp_ms)
 
-    # --------------------------------------------------------
     # Build segmentation mask
-    # --------------------------------------------------------
-
     if result.segmentation_masks:
         mask = result.segmentation_masks[0].numpy_view()
-        mask = cv2.resize(mask, (frame.shape[1], frame.shape[0]))
-
-        # 1. Threshold (binary silhouette)
+        mask = cv2.resize(mask, (w, h))
         mask = (mask > SEGMENTATION_THRESHOLD).astype(np.uint8) * 255
 
-        # 2. Dilation (thickens body, fixes holes)
         if ENABLE_DILATION:
             kernel = cv2.getStructuringElement(
                 cv2.MORPH_ELLIPSE,
@@ -166,53 +170,29 @@ while True:
             )
             mask = cv2.dilate(mask, kernel, iterations=DILATION_ITERATIONS)
 
-        # 3. Blur (softens jagged edges)
         if ENABLE_BLUR:
             mask = cv2.GaussianBlur(
                 mask,
                 (BLUR_KERNEL_SIZE, BLUR_KERNEL_SIZE),
                 0
             )
-
     else:
-        mask = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.uint8)
+        mask = np.zeros((h, w), dtype=np.uint8)
 
     # --------------------------------------------------------
-    # Preview window (DEBUG / TUNING)
+    # IMPORTANT: convert GRAY → BGR (macOS / OBS requirement)
     # --------------------------------------------------------
 
-    if SHOW_PREVIEW:
-        preview = mask
+    frame_out = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
 
-        if PREVIEW_SCALE != 1.0:
-            preview = cv2.resize(
-                preview,
-                None,
-                fx=PREVIEW_SCALE,
-                fy=PREVIEW_SCALE,
-                interpolation=cv2.INTER_NEAREST
-            )
-
-        cv2.putText(
-            preview,
-            f"Stereo:{STEREO_VIEW}  Thresh:{SEGMENTATION_THRESHOLD}",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            255,
-            2
-        )
-
-        cv2.imshow("BlazePose Mask Preview", preview)
-
-    # ESC quits cleanly
-    if cv2.waitKey(1) & 0xFF == 27:
-        break
+    # Send to virtual camera
+    virtual_cam.send(frame_out)
+    virtual_cam.sleep_until_next_frame()
 
 # ------------------------------------------------------------
 # Cleanup
 # ------------------------------------------------------------
 
+virtual_cam.close()
 cap.release()
-cv2.destroyAllWindows()
 pose.close()
