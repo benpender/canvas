@@ -31,40 +31,7 @@
             pointer-events: none;
         }
 
-        #webcam-controls {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 6px 10px;
-            background: var(--profiler-header-bg, rgba(42, 42, 51, 0.7));
-            border-bottom: 1px solid var(--profiler-border, #444);
-            font-family: var(--font-family, sans-serif);
-        }
-
-        #webcam-controls button {
-            background: #0a84ff;
-            border: none;
-            color: #fff;
-            padding: 6px 12px;
-            border-radius: 6px;
-            font-size: 12px;
-            font-weight: 600;
-            cursor: pointer;
-        }
-
-        #webcam-controls button:disabled {
-            opacity: 0.6;
-            cursor: default;
-        }
-
-        #webcam-controls span {
-            font-size: 11px;
-            color: var(--text-secondary, #aaa);
-        }
-
-        #webcam-controls span[data-state="error"] {
-            color: #ff7a7a;
-        }
+        /* Removed #webcam-controls styles */
     </style>
 </head>
 
@@ -212,7 +179,7 @@
         let pose = null;
         let webcamActive = false;
         let webcamButton = null;
-        let cameraSelect = null;
+        // Removed webcamStatus, cameraSelect
         const webcamInfo = { status: 'Idle' };
         let startBtnCtrl = null;
         let stopBtnCtrl = null;
@@ -293,10 +260,8 @@
                 updateWebcamStatus('Requesting camera...');
                 if (webcamButton) webcamButton.disabled = true;
 
-                const deviceId = cameraSelect ? cameraSelect.value : null;
-                const constraints = {
-                    video: deviceId ? { deviceId: { exact: deviceId } } : true
-                };
+                // Simplified constraints (default camera)
+                const constraints = { video: true };
 
                 console.log('DEBUG: Requesting user media...', constraints);
                 let stream;
@@ -565,99 +530,7 @@
             if (webcamButton) webcamButton.disabled = false;
         };
 
-        const setupWebcamControls = async () => {
-
-            let container = document.getElementById('webcam-overlay');
-            if (!container) {
-                container = document.createElement('div');
-                container.id = 'webcam-overlay';
-                container.style.position = 'absolute';
-                container.style.top = '10px';
-                container.style.left = '10px';
-                container.style.zIndex = '1000';
-                container.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
-                container.style.padding = '10px';
-                container.style.borderRadius = '8px';
-                container.style.display = 'flex';
-                container.style.alignItems = 'center';
-                container.style.gap = '10px';
-                document.body.appendChild(container);
-            }
-
-            // Camera Select
-            cameraSelect = document.createElement('select');
-            cameraSelect.style.padding = '5px';
-            cameraSelect.style.borderRadius = '4px';
-            cameraSelect.style.maxWidth = '200px';
-
-            const refreshCameras = async () => {
-                cameraSelect.innerHTML = '';
-                try {
-                    const devices = await navigator.mediaDevices.enumerateDevices();
-                    const videoDevices = devices.filter(device => device.kind === 'videoinput');
-
-                    if (videoDevices.length === 0) {
-                        const option = document.createElement('option');
-                        option.text = 'No cameras found';
-                        cameraSelect.add(option);
-                        return;
-                    }
-
-                    videoDevices.forEach(device => {
-                        const option = document.createElement('option');
-                        option.value = device.deviceId;
-                        option.text = device.label || `Camera ${cameraSelect.length + 1}`;
-                        if (device.label.toLowerCase().includes('virtual')) {
-                            option.selected = true;
-                        }
-                        cameraSelect.add(option);
-                    });
-                } catch (e) {
-                    console.error('Error enumerating devices:', e);
-                    const option = document.createElement('option');
-                    option.text = 'Error enumerating';
-                    cameraSelect.add(option);
-                }
-            };
-
-            // Trigger permission request if labels are empty? 
-            // Often labels are empty until permission is granted. 
-            // We'll try to list, but the user might need to click "Start" once, grant permission, then Refresh.
-            await refreshCameras();
-
-            // Refresh Button
-            const refreshBtn = document.createElement('button');
-            refreshBtn.textContent = '↻';
-            refreshBtn.title = 'Refresh Cameras';
-            refreshBtn.onclick = refreshCameras;
-            refreshBtn.style.padding = '5px 8px';
-            refreshBtn.style.cursor = 'pointer';
-
-            webcamButton = document.createElement('button');
-            webcamButton.id = 'webcam-start-btn';
-            webcamButton.textContent = 'Start Webcam';
-            webcamButton.style.padding = '5px 10px';
-            webcamButton.style.cursor = 'pointer';
-
-            const stopButton = document.createElement('button');
-            stopButton.id = 'webcam-stop-btn';
-            stopButton.textContent = 'Stop Webcam';
-            stopButton.style.padding = '5px 10px';
-            stopButton.style.cursor = 'pointer';
-
-            webcamStatus = document.createElement('span');
-            webcamStatus.textContent = 'Idle';
-            webcamStatus.style.color = '#fff';
-            webcamStatus.style.fontFamily = 'monospace';
-            webcamStatus.dataset.state = 'ok';
-
-            webcamButton.addEventListener('click', startWebcam);
-            stopButton.addEventListener('click', stopWebcam);
-
-            container.innerHTML = '';
-            container.append(cameraSelect, refreshBtn, webcamButton, stopButton, webcamStatus);
-
-        };
+        // Removed setupWebcamControls function
 
         init();
 
@@ -697,7 +570,7 @@
 
             window.addEventListener('resize', onWindowResize);
             connectImu();
-            setupWebcamControls();
+            // Removed setupWebcamControls call
 
             // -----------------------------------------------------------------
             // START: Projection Mask Setup
@@ -821,6 +694,8 @@
             const boundHalfExtent = uniform(8);
             const colorA = uniform(color('#5900ff'));
             const colorB = uniform(color('#ffa575'));
+            const enableDistanceScaling = uniform(0);
+            const distanceScaleInfluence = uniform(1.0);
 
             const positionBuffer = instancedArray(count, 'vec3');
             const velocityBuffer = instancedArray(count, 'vec3');
@@ -950,7 +825,38 @@
 
             })();
 
-            material.scaleNode = particleMassMultiplier.mul(scale);
+            // TSL Logic for Distance Scaling
+            const getMinDistanceToAttractor = Fn(() => {
+                const position = positionBuffer.toAttribute();
+                const minDistance = float(1e10).toVar();
+
+                Loop(attractorsLength, ({ i }) => {
+                    const attractorPosition = attractorsPositions.element(i);
+                    const dist = position.sub(attractorPosition).length();
+                    minDistance.assign(minDistance.min(dist));
+                });
+                return minDistance;
+            });
+
+            // Base Scale logic
+            const baseScale = particleMassMultiplier.mul(scale);
+
+            material.scaleNode = Fn(() => {
+                const finalScale = float(baseScale).toVar();
+
+                If(enableDistanceScaling.greaterThan(0.5), () => {
+                    // Logic: Closer to attractor = Larger
+                    // Modulate scale by inverse distance or similar
+                    const dist = getMinDistanceToAttractor();
+                    // Example modulation: scale * (1.0 + influence / (distance + 0.1))
+                    // Tunable: distanceScaleInfluence
+                    const scaleFactor = float(1.0).add(distanceScaleInfluence.div(dist.add(0.1)));
+                    finalScale.assign(baseScale.mul(scaleFactor));
+                });
+
+                return finalScale;
+            })();
+
             material.rotationNode = Fn(() => {
 
                 const velocity = velocityBuffer.toAttribute();
@@ -986,6 +892,20 @@
             gui.add(boundHalfExtent, 'value', 0, 20, 0.01).name('boundHalfExtent');
             gui.addColor({ color: colorA.value.getHexString(THREE.SRGBColorSpace) }, 'color').name('colorA').onChange(value => colorA.value.set(value));
             gui.addColor({ color: colorB.value.getHexString(THREE.SRGBColorSpace) }, 'color').name('colorB').onChange(value => colorB.value.set(value));
+
+            // Particle Count Slider
+            const particleSettings = { particleCountExponent: 18 };
+            gui.add(particleSettings, 'particleCountExponent', 10, 18, 1).name('Particle Count (2^x)').onChange(value => {
+                mesh.count = Math.pow(2, value);
+            });
+
+            // Distance Scaling Controls
+            gui.add({ enableScale: false }, 'enableScale').name('Enable Dist. Scaling').onChange(val => {
+                enableDistanceScaling.value = val ? 1 : 0;
+            });
+            gui.add(distanceScaleInfluence, 'value', 0.1, 10.0).name('Dist. Scale Inf.');
+
+
             gui.add({ controlsMode: attractors[0].controls.mode }, 'controlsMode', ['translate', 'rotate', 'none']).onChange(value => {
 
                 for (const attractor of attractors) {
