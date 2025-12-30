@@ -95,6 +95,7 @@
             cropWidth: 0,
             cropX: 0,
             virtualVideo: false,
+            virtualSocket: false,
             enableMasking: true
         };
 
@@ -252,7 +253,98 @@
 
         };
 
+        let ws = null;
+
+        const startWebSocket = () => {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+
+            updateWebcamStatus('Connecting to WebSocket...');
+            ws = new WebSocket('ws://localhost:8765');
+            ws.binaryType = 'blob';
+
+            ws.onopen = () => {
+                console.log('WS Connected');
+                updateWebcamStatus('WebSocket Active');
+                webcamActive = true;
+                if (webcamButton) webcamButton.disabled = true;
+            };
+
+            ws.onmessage = async (event) => {
+                if (!webcamConfig.virtualSocket) return;
+                try {
+                    const bitmap = await createImageBitmap(event.data);
+
+                    // Dynamic Resize Logic
+                    if (sourceWidth !== bitmap.width || sourceHeight !== bitmap.height) {
+                        sourceWidth = bitmap.width;
+                        sourceHeight = bitmap.height;
+
+                        maskCanvas.width = sourceWidth;
+                        maskCanvas.height = sourceHeight;
+                        procCanvas.width = sourceWidth;
+                        procCanvas.height = sourceHeight;
+
+                        // Update Visual Sprite Aspect Ratio
+                        const aspect = sourceWidth / sourceHeight;
+                        const visualWidth = webcamConfig.spriteScale * aspect;
+                        const visualHeight = webcamConfig.spriteScale;
+
+                        if (maskSprite) {
+                            maskSprite.scale.set(visualWidth, visualHeight, 1);
+                        }
+
+                        // Re-init texture
+                        if (maskTexture) {
+                            maskTexture.dispose();
+                            maskTexture = new THREE.CanvasTexture(maskCanvas);
+                            maskTexture.colorSpace = THREE.SRGBColorSpace;
+                            maskTexture.minFilter = THREE.LinearFilter;
+                            maskTexture.magFilter = THREE.LinearFilter;
+                            if (maskSprite) maskSprite.material.colorNode = texture(maskTexture);
+                        }
+
+                        updateWebcamStatus(`WebSocket Stream ${sourceWidth}x${sourceHeight}`);
+                    }
+
+                    // Direct draw + Horizontal Flip (Mirroring)
+                    maskCtx.save();
+                    maskCtx.translate(maskCanvas.width, 0);
+                    maskCtx.scale(-1, 1);
+                    maskCtx.drawImage(bitmap, 0, 0, maskCanvas.width, maskCanvas.height);
+                    maskCtx.restore();
+
+                    if (maskTexture) maskTexture.needsUpdate = true;
+
+                    bitmap.close();
+                } catch (e) {
+                    console.error('Frame decode error:', e);
+                }
+            };
+
+            ws.onerror = (e) => {
+                console.error('WS Error:', e);
+                updateWebcamStatus('WebSocket Error', true);
+                webcamActive = false;
+                if (webcamButton) webcamButton.disabled = false;
+            };
+
+            ws.onclose = () => {
+                console.log('WS Closed');
+                webcamActive = false;
+                if (webcamButton) webcamButton.disabled = false;
+            }
+        };
+
         const startWebcam = async () => {
+
+            // Priority: WebSocket > Webcam
+            if (webcamConfig.virtualSocket) {
+                startWebSocket();
+                return;
+            }
 
             if (webcamActive) return;
 
@@ -954,6 +1046,13 @@
             webcamGroup.add(webcamConfig, 'spriteScale', 1, 20).name('Scale').listen().onChange(applyCropConfig);
 
             webcamGroup.add(webcamConfig, 'virtualVideo').name('Virtual Video (Pre-processed)').listen().onChange(applyCropConfig);
+
+            webcamGroup.add(webcamConfig, 'virtualSocket').name('Use Virtual Socket (Python)').onChange(v => {
+                if (webcamActive) {
+                    webcamActive = false; // Force reset
+                    startWebcam();
+                }
+            });
 
             webcamGroup.add(webcamConfig, 'cropMode', ['full', 'left', 'right'])
                 .name('Crop Mode')
